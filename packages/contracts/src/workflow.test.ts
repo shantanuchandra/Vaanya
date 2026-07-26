@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canTransition,
   EncounterSchema,
+  RecordingListSchema,
   resolveProposal,
   signEncounter
 } from "./index";
@@ -59,6 +60,31 @@ const encounter = EncounterSchema.parse({
 });
 
 describe("workflow transitions", () => {
+  it("validates an evidence-backed synthetic recording list item", () => {
+    expect(
+      RecordingListSchema.parse([
+        {
+          encounterId: "synthetic-shantanu",
+          patient: {
+            id: "patient-shantanu",
+            displayName: "Shantanu Chandra",
+            mobileNumber: "+919811110001",
+            mobileLast4: "0001"
+          },
+          synthetic: true,
+          procedure: "Laparoscopic hernia repair",
+          preferredLanguage: "hi-IN",
+          recordedAt: "2026-07-26T08:30:00.000Z",
+          status: "uploaded",
+          answeredCount: 2,
+          applicableCount: 4,
+          criticalGapCount: 1,
+          hasTranscript: false
+        }
+      ])
+    ).toHaveLength(1);
+  });
+
   it("rejects signing while a required field is uncertain", () => {
     expect(() =>
       signEncounter(encounter, {
@@ -106,4 +132,3 @@ describe("workflow transitions", () => {
     expect(canTransition("created", "consented")).toBe(true);
   });
 });
-
