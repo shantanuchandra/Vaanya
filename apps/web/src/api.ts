@@ -233,7 +233,7 @@ export async function transcribeExampleRecording(
 export async function processCompleteExampleRecording(
   encounterId: string
 ): Promise<{
-  status: "completed";
+  status: "completed" | "cached";
   encounter: Encounter;
 }> {
   const response = await protectedFetch(
@@ -250,6 +250,37 @@ export async function processCompleteExampleRecording(
     );
   return {
     status: "completed",
+    encounter: EncounterSchema.parse(payload.encounter)
+  };
+}
+
+export async function processCompleteRecordingFile(
+  encounterId: string,
+  file: File
+): Promise<{
+  status: "completed";
+  filename: string;
+  encounter: Encounter;
+}> {
+  const form = new FormData();
+  form.set("file", file, file.name);
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/complete-recording`,
+    {
+      method: "POST",
+      body: form
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok)
+    throw new Error(
+      payload.message ??
+        "Selected recording could not be converted into evidence."
+    );
+  return {
+    status: "completed",
+    filename:
+      typeof payload.filename === "string" ? payload.filename : file.name,
     encounter: EncounterSchema.parse(payload.encounter)
   };
 }

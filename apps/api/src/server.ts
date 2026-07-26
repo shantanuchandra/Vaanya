@@ -343,6 +343,8 @@ function topicCounts(turns: PacConversationTurn[]) {
 function encounterFromDiarizedRecording(input: {
   encounter: Encounter;
   actorId: string;
+  filename: string;
+  syntheticDemo: boolean;
   sarvamRequestId: string | null;
   segments: DiarizedSegment[];
   turns: PacConversationTurn[];
@@ -410,8 +412,8 @@ function encounterFromDiarizedRecording(input: {
         actorId: input.actorId,
         occurredAt: new Date().toISOString(),
         detail: {
-          syntheticDemo: true,
-          filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
+          syntheticDemo: input.syntheticDemo,
+          filename: input.filename,
           sarvamRequestId: input.sarvamRequestId,
           segmentCount: input.segments.length,
           customerSummaryGenerated: Boolean(input.customerSummary),
@@ -422,6 +424,49 @@ function encounterFromDiarizedRecording(input: {
         }
       }
     ]
+  });
+}
+
+async function processCompleteRecordingIntoEncounter(input: {
+  encounter: Encounter;
+  actorId: string;
+  sarvamClient: SpeechExtractionClient;
+  openAiPacClient: NonNullable<BuildServerOptions["openAiPacClient"]>;
+  audio: {
+    bytes: Buffer;
+    filename: string;
+    mimeType: string;
+  };
+  syntheticDemo: boolean;
+}) {
+  const sarvamResult = await input.sarvamClient.processDiarizedTranslation!(
+    {
+      bytes: input.audio.bytes,
+      filename: input.audio.filename,
+      mimeType: input.audio.mimeType,
+      languageCode: "hi-IN"
+    }
+  );
+  const activeChecklist = withEvaluatedChecklist(input.encounter).checklist!;
+  const structure = await input.openAiPacClient.structurePacConversation(
+    sarvamResult.segments,
+    activeChecklist.items
+      .filter(
+        item =>
+          item.applicable && item.authority === "evidence_or_clinician"
+      )
+      .map(item => ({ itemId: item.id, label: item.label }))
+  );
+  return encounterFromDiarizedRecording({
+    encounter: input.encounter,
+    actorId: input.actorId,
+    filename: input.audio.filename,
+    syntheticDemo: input.syntheticDemo,
+    sarvamRequestId: sarvamResult.requestId,
+    segments: sarvamResult.segments,
+    turns: structure.turns,
+    checklistProposals: structure.checklistProposals,
+    customerSummary: structure.customerSummary
   });
 }
 
@@ -999,31 +1044,18 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
     try {
-      const sarvamResult = await sarvamClient.processDiarizedTranslation({
-        bytes: await readFile(COMPLETE_EXAMPLE_RECORDING_PATH),
-        filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
-        mimeType: "audio/mp4",
-        languageCode: "hi-IN"
-      });
-      const activeChecklist = withEvaluatedChecklist(encounter).checklist!;
-      const structure = await openAiPacClient.structurePacConversation(
-        sarvamResult.segments,
-        activeChecklist.items
-          .filter(
-            item =>
-              item.applicable && item.authority === "evidence_or_clinician"
-          )
-          .map(item => ({ itemId: item.id, label: item.label }))
-      );
       const saved = await store.save(
-        encounterFromDiarizedRecording({
+        await processCompleteRecordingIntoEncounter({
           encounter,
           actorId: request.actor!.id,
-          sarvamRequestId: sarvamResult.requestId,
-          segments: sarvamResult.segments,
-          turns: structure.turns,
-          checklistProposals: structure.checklistProposals,
-          customerSummary: structure.customerSummary
+          sarvamClient,
+          openAiPacClient,
+          audio: {
+            bytes: await readFile(COMPLETE_EXAMPLE_RECORDING_PATH),
+            filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
+            mimeType: "audio/mp4"
+          },
+          syntheticDemo: true
         })
       );
       return { status: "completed" as const, encounter: saved };
@@ -1033,6 +1065,68 @@ export async function buildServer(options: BuildServerOptions = {}) {
         code: "COMPLETE_SYNTHETIC_RECORDING_FAILED",
         message:
           "The complete synthetic recording could not be diarized, translated, or structured."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+  }>("/api/encounters/:id/complete-recording", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    if (!encounter.consentRecorded || encounter.state !== "clinician_review") {
+      return reply.code(409).send({
+        code: "CAPTURE_NOT_ALLOWED",
+        message: "Recording upload requires consent and clinician review state."
+      });
+    }
+    if (!sarvamClient?.processDiarizedTranslation) {
+      return reply.code(503).send({
+        code: "SARVAM_BATCH_NOT_CONFIGURED",
+        message: "Sarvam batch diarized translation is not configured."
+      });
+    }
+    if (!openAiPacClient) {
+      return reply.code(503).send({
+        code: "OPENAI_NOT_CONFIGURED",
+        message: "OpenAI PAC structuring is not configured."
+      });
+    }
+    const audio = await request.file();
+    if (!audio) {
+      return reply.code(400).send({
+        code: "AUDIO_REQUIRED",
+        message: "Choose one PAC conversation audio or MP4 file."
+      });
+    }
+    try {
+      const saved = await store.save(
+        await processCompleteRecordingIntoEncounter({
+          encounter,
+          actorId: request.actor!.id,
+          sarvamClient,
+          openAiPacClient,
+          audio: {
+            bytes: await audio.toBuffer(),
+            filename: audio.filename,
+            mimeType: audio.mimetype
+          },
+          syntheticDemo: false
+        })
+      );
+      return {
+        status: "completed" as const,
+        filename: audio.filename,
+        encounter: saved
+      };
+    } catch (error) {
+      request.log.error({ error }, "Uploaded PAC recording processing failed");
+      return reply.code(502).send({
+        code: "COMPLETE_RECORDING_FAILED",
+        message:
+          "The selected recording could not be diarized, translated, or structured."
       });
     }
   });
