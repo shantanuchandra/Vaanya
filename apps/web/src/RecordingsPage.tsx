@@ -118,6 +118,11 @@ export function RecordingsPage({
               <div className="recording-metrics">
                 <span>{recording.answeredCount} of {recording.applicableCount} answered</span>
                 <span>{recording.criticalGapCount} critical gaps</span>
+                {recording.checklistLibrary ? (
+                  <span className="recording-library-badge">
+                    Using organization checklist v{recording.checklistLibrary.version}
+                  </span>
+                ) : null}
               </div>
               <span className={`recording-status recording-status-${recording.status}`}>
                 {statusLabels[recording.status]}

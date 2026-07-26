@@ -101,7 +101,8 @@ export const RecordingListItemSchema = z.object({
   applicableCount: z.number().int().positive(),
   criticalGapCount: z.number().int().nonnegative(),
   hasTranscript: z.boolean(),
-  secondOpinionRequested: z.boolean().optional()
+  secondOpinionRequested: z.boolean().optional(),
+  checklistLibrary: ChecklistLibraryReferenceSchema.optional()
 });
 
 export type RecordingListItem = z.infer<typeof RecordingListItemSchema>;

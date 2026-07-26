@@ -1098,6 +1098,11 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   color: var(--muted);
 }
 
+.recording-library-badge {
+  color: var(--green);
+  font-weight: 650;
+}
+
 .recording-status {
   padding: 6px 9px;
   border-radius: 999px;
