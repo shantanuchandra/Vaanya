@@ -26,6 +26,25 @@ describe("procedure-aware PAC checklist", () => {
     );
   });
 
+  it.each([
+    ["Laparoscopic hernia repair", "recent_abdominal_symptoms"],
+    ["Laparoscopic hysterectomy", "anemia_investigation"],
+    ["Knee replacement", "procedure_medicine_reconciliation"],
+    ["Upper GI endoscopy", "upper_gi_reported_fasting"],
+    ["Transurethral urological procedure", "procedure_previous_anesthesia_review"],
+    ["Cataract surgery", "procedure_allergy_reconciliation"],
+    ["Breast surgery", "procedure_previous_anesthesia_review"]
+  ])("activates a documentation modifier for %s", (procedure, itemId) => {
+    const result = evaluateChecklist({
+      procedure,
+      contextFlags: [],
+      proposals: [],
+      transcript: []
+    });
+
+    expect(result.items.find(item => item.id === itemId)?.applicable).toBe(true);
+  });
+
   it("does not activate pregnancy documentation without explicit clinician context", () => {
     const result = evaluateChecklist({
       procedure: "Laparoscopic hysterectomy",

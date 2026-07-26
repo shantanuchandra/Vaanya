@@ -72,6 +72,7 @@ export const FieldProposalSchema = z
 export const PatientSummarySchema = z.object({
   id: z.string().min(1),
   displayName: z.string().min(1),
+  sex: z.enum(["female", "male", "other", "unknown"]).optional(),
   mobileNumber: z.string().min(1),
   mobileLast4: z.string().min(4).max(4)
 });
@@ -99,7 +100,8 @@ export const RecordingListItemSchema = z.object({
   answeredCount: z.number().int().nonnegative(),
   applicableCount: z.number().int().positive(),
   criticalGapCount: z.number().int().nonnegative(),
-  hasTranscript: z.boolean()
+  hasTranscript: z.boolean(),
+  secondOpinionRequested: z.boolean().optional()
 });
 
 export type RecordingListItem = z.infer<typeof RecordingListItemSchema>;
@@ -248,9 +250,10 @@ export function enterChecklistItem(
   if (encounter.state !== "clinician_review")
     throw new Error("Checklist items can only be entered during clinician review.");
   if (!command.value.trim()) throw new Error("Checklist value cannot be empty.");
-  const definition = SYNTHETIC_PAC_TEMPLATE.items.find(
-    current => current.id === command.itemId
-  );
+  const definition = [
+    ...SYNTHETIC_PAC_TEMPLATE.items,
+    ...encounter.checklistExtensions
+  ].find(current => current.id === command.itemId);
   if (!definition) throw new Error(`Unknown checklist item: ${command.itemId}`);
   const evaluated = withEvaluatedChecklist(encounter).checklist!;
   const current = evaluated.items.find(item => item.id === command.itemId);
@@ -292,9 +295,10 @@ export function deferChecklistItem(
   if (encounter.state !== "clinician_review")
     throw new Error("Checklist items can only be deferred during clinician review.");
   if (!command.reason.trim()) throw new Error("A deferral reason is required.");
-  const definition = SYNTHETIC_PAC_TEMPLATE.items.find(
-    current => current.id === command.itemId
-  );
+  const definition = [
+    ...SYNTHETIC_PAC_TEMPLATE.items,
+    ...encounter.checklistExtensions
+  ].find(current => current.id === command.itemId);
   if (!definition) throw new Error(`Unknown checklist item: ${command.itemId}`);
   if (!definition.deferrable)
     throw new Error(`${definition.label} cannot be deferred.`);

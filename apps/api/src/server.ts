@@ -40,6 +40,7 @@ import {
   SarvamClient,
   type DiarizedSegment,
   type SarvamLanguageCode,
+  type SarvamTextLanguageCode,
   type PacSuggestion,
   type TranscriptionInput,
   type TranscriptionResult
@@ -90,6 +91,14 @@ type BuildServerOptions = {
     synthesizeKannada(
       text: string
     ): Promise<{ requestId: string | null; audioBase64: string }>;
+    translateText?(input: {
+      text: string;
+      targetLanguageCode: SarvamTextLanguageCode;
+    }): Promise<{ requestId: string | null; translatedText: string }>;
+    synthesizeSpeech?(input: {
+      text: string;
+      languageCode: SarvamTextLanguageCode;
+    }): Promise<{ requestId: string | null; audioBase64: string }>;
   };
   authenticator?: Authenticator;
   openAiPacClient?: {
@@ -122,6 +131,13 @@ const EXAMPLE_RECORDING_PATH = fileURLToPath(
 const COMPLETE_EXAMPLE_RECORDING_PATH = fileURLToPath(
   new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.mp4", import.meta.url)
 );
+const PATIENT_SUMMARY_LANGUAGES = new Set<SarvamTextLanguageCode>([
+  "en-IN",
+  "hi-IN",
+  "kn-IN",
+  "ta-IN",
+  "te-IN"
+]);
 
 type SpeechExtractionClient = NonNullable<BuildServerOptions["sarvamClient"]>;
 
@@ -1017,6 +1033,60 @@ export async function buildServer(options: BuildServerOptions = {}) {
         code: "COMPLETE_SYNTHETIC_RECORDING_FAILED",
         message:
           "The complete synthetic recording could not be diarized, translated, or structured."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+    Body: { languageCode?: SarvamTextLanguageCode };
+  }>("/api/encounters/:id/patient-summary-handoff", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    const languageCode = request.body?.languageCode ?? encounter.preferredLanguage;
+    if (!PATIENT_SUMMARY_LANGUAGES.has(languageCode as SarvamTextLanguageCode)) {
+      return reply.code(400).send({
+        code: "UNSUPPORTED_LANGUAGE",
+        message: "Choose one of the Sarvam demo languages."
+      });
+    }
+    const sourceText = encounter.customerSummary?.trim();
+    if (!sourceText) {
+      return reply.code(409).send({
+        code: "SUMMARY_NOT_READY",
+        message: "Process the PAC recording before generating patient audio."
+      });
+    }
+    if (!sarvamClient?.translateText || !sarvamClient?.synthesizeSpeech) {
+      return reply.code(503).send({
+        code: "SARVAM_NOT_CONFIGURED",
+        message: "Patient-language summary audio is not configured."
+      });
+    }
+    try {
+      const targetLanguageCode = languageCode as SarvamTextLanguageCode;
+      const translation = await sarvamClient.translateText({
+        text: sourceText,
+        targetLanguageCode
+      });
+      const speech = await sarvamClient.synthesizeSpeech({
+        text: translation.translatedText,
+        languageCode: targetLanguageCode
+      });
+      return {
+        sourceText,
+        translatedText: translation.translatedText,
+        languageCode: targetLanguageCode,
+        audioBase64: speech.audioBase64,
+        audioMimeType: "audio/mpeg"
+      };
+    } catch (error) {
+      request.log.error({ error }, "Patient summary handoff failed");
+      return reply.code(502).send({
+        code: "PATIENT_SUMMARY_HANDOFF_FAILED",
+        message: "The patient-language summary could not be generated."
       });
     }
   });

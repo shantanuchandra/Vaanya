@@ -3,6 +3,7 @@ import {
   EncounterSchema,
   resolveProposal,
   signEncounter,
+  withEvaluatedChecklist,
   type Encounter
 } from "@vaanaya/contracts";
 
@@ -47,9 +48,13 @@ if (corpus.length !== 3)
   throw new Error(`Expected three simulation cases, received ${corpus.length}.`);
 
 function toEncounter(testCase: CorpusCase): Encounter {
-  const proposals = Object.entries(testCase.expected_pac).map(
+  const checklistIdByCorpusField: Record<string, string> = {
+    fasting_readiness: "fasting",
+    prior_anesthesia_history: "previous_anesthesia"
+  };
+  const scenarioProposals = Object.entries(testCase.expected_pac).map(
     ([field, expectation]) => ({
-      id: field,
+      id: checklistIdByCorpusField[field] ?? field,
       label: field.replaceAll("_", " "),
       state: expectation.state,
       value: expectation.value,
@@ -57,7 +62,34 @@ function toEncounter(testCase: CorpusCase): Encounter {
       required: true
     })
   );
-  return EncounterSchema.parse({
+  const baselineIds = [
+    "identity",
+    "procedure",
+    "consent",
+    "medical_history",
+    "medications",
+    "allergies",
+    "previous_anesthesia",
+    "fasting",
+    "examination",
+    "open_items",
+    "clinician_conclusion"
+  ];
+  const scenarioIds = new Set(scenarioProposals.map(proposal => proposal.id));
+  const proposals = [
+    ...baselineIds
+      .filter(id => !scenarioIds.has(id))
+      .map(id => ({
+        id,
+        label: id.replaceAll("_", " "),
+        state: "clinician_entered" as const,
+        value: `Clinician reviewed ${id.replaceAll("_", " ")}.`,
+        sourceTurnIds: [],
+        required: true
+      })),
+    ...scenarioProposals
+  ];
+  return withEvaluatedChecklist(EncounterSchema.parse({
     id: testCase.case_id,
     patientReference: testCase.case_id,
     procedure: testCase.patient_profile.procedure_context,
@@ -76,7 +108,7 @@ function toEncounter(testCase: CorpusCase): Encounter {
       offsetSeconds: index * 8
     })),
     audit: []
-  });
+  }));
 }
 
 const results = corpus.map(testCase => {

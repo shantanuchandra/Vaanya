@@ -8,12 +8,15 @@ import { AuthGate } from "./AuthGate";
 import { createSupabaseAuth } from "./auth";
 import { ReviewPage } from "./ReviewPage";
 import { EvidencePage } from "./EvidencePage";
+import { RecordingsRoute } from "./RecordingsRoute";
 
 const auth = createSupabaseAuth();
 const page = window.location.pathname.startsWith("/review") ? (
   <ReviewPage />
 ) : window.location.pathname.startsWith("/evidence") ? (
   <EvidencePage />
+) : window.location.pathname.startsWith("/recordings") ? (
+  <RecordingsRoute />
 ) : (
   <App />
 );

@@ -8,12 +8,13 @@ export function createDemoEncounter(): Encounter {
   return withEvaluatedChecklist(EncounterSchema.parse({
     id: "demo",
     patient: {
-      id: "patient-demo-shantanu",
-      displayName: "Shantanu Chandra",
+      id: "patient-demo-sulochana",
+      displayName: "Sulochana Patel",
+      sex: "female",
       mobileNumber: "+919811110001",
       mobileLast4: "0001"
     },
-    patientReference: "Shantanu Chandra",
+    patientReference: "Sulochana Patel",
     procedure: "Laparoscopic hernia repair",
     preferredLanguage: "hi-IN",
     state: "clinician_review",
@@ -85,7 +86,7 @@ export function createDemoEncounter(): Encounter {
         speaker: "patient",
         language: "hi-IN",
         original:
-          "Woh khoon patla karne wali goli leta hoon… naam yaad nahi… kal bhi li thi.",
+          "Woh khoon patla karne wali goli leti hoon… naam yaad nahi… kal bhi li thi.",
         translation:
           "I take a blood-thinning tablet; I do not remember the name; I took it yesterday.",
         confidence: 0.92,

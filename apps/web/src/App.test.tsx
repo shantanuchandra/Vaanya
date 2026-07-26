@@ -53,68 +53,29 @@ const demoEncounter = {
 };
 
 describe("PAC review workspace", () => {
-  it("opens a recording from the worklist in the existing evidence rail", async () => {
-    const user = userEvent.setup();
-    const shantanuEncounter = {
-      ...demoEncounter,
-      patient: {
-        id: "patient-demo",
-        displayName: "Shantanu Chandra",
-        mobileNumber: "+919811110001",
-        mobileLast4: "0001"
-      },
-      patientReference: "Shantanu Chandra",
-      procedure: "Laparoscopic hernia repair"
-    };
+  it("keeps conversation listings out of the review page and links to the standalone page", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/api/recordings")) {
-          return {
-            ok: true,
-            json: async () => [
-              {
-                encounterId: "demo",
-                patient: shantanuEncounter.patient,
-                synthetic: true,
-                procedure: shantanuEncounter.procedure,
-                preferredLanguage: "hi-IN",
-                recordedAt: "2026-07-26T08:30:00.000Z",
-                status: "ready_for_review",
-                answeredCount: 3,
-                applicableCount: 4,
-                criticalGapCount: 1,
-                hasTranscript: true
-              }
-            ]
-          };
-        }
-        if (url.includes("/api/patients")) {
-          return { ok: true, json: async () => [shantanuEncounter.patient] };
-        }
-        return { ok: true, json: async () => shantanuEncounter };
-      })
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => demoEncounter
+      }))
     );
 
     render(<App />);
-    await user.click(
-      await screen.findByRole("button", { name: "Recordings" })
-    );
-    expect(
-      await screen.findByRole("heading", { name: "Recordings" })
-    ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", {
-        name: /continue review.*shantanu chandra/i
-      })
-    );
+
     expect(
       await screen.findByRole("heading", {
         name: "Listen once. Verify precisely."
       })
     ).toBeInTheDocument();
-    expect(screen.getAllByText("Shantanu Chandra").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "Recordings" })).toHaveAttribute(
+      "href",
+      "/recordings"
+    );
+    expect(
+      screen.queryByRole("heading", { name: /conversation listings/i })
+    ).not.toBeInTheDocument();
   });
 
   it("lets a doctor choose a patient, upload the complete synthetic recording, and review generated next questions", async () => {
@@ -199,7 +160,9 @@ describe("PAC review workspace", () => {
       screen.getByRole("button", { name: /upload complete synthetic recording/i })
     );
 
-    expect(await screen.findByText("Current medicines")).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText("Current or recent medicines")).length
+    ).toBeGreaterThan(0);
     expect(screen.getByText("Clinician-selected procedure")).toBeInTheDocument();
     expect(screen.getAllByText("Elective hernia repair").length).toBeGreaterThan(0);
     expect(
@@ -210,9 +173,12 @@ describe("PAC review workspace", () => {
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /ask for 2nd opinion/i }));
-    expect(await screen.findByText(/2nd opinion raised/i)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /needs 2nd opinion/i }));
-    expect(screen.getAllByText("Ravi Kumar").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /highlighted in conversation listings/i
+    );
+    expect(
+      screen.queryByRole("button", { name: /needs 2nd opinion/i })
+    ).not.toBeInTheDocument();
   });
 
   it("shows the uncertainty before allowing sign-off", async () => {
@@ -226,7 +192,9 @@ describe("PAC review workspace", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Current medicines")).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText("Current or recent medicines")).length
+    ).toBeGreaterThan(0);
     expect(screen.getByText("Needs confirmation")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /sign pac note/i })
@@ -375,7 +343,7 @@ describe("PAC review workspace", () => {
       })
     });
 
-    expect(await screen.findByText(/blood thinner/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/blood thinner/i)).length).toBeGreaterThan(0);
     expect(screen.getByText(/90% confidence/i)).toBeInTheDocument();
     const completeUploadCall = (
       fetcher.mock.calls as unknown as Array<
@@ -439,6 +407,78 @@ describe("PAC review workspace", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(
       /mock email queued for demo patient/i
+    );
+  });
+
+  it("lets the doctor switch patient summary language and play generated audio in the drawer", async () => {
+    const user = userEvent.setup();
+    const processedEncounter = {
+      ...demoEncounter,
+      customerSummary:
+        "Your PAC recording is ready for doctor review. Please bring your medicine strip.",
+      audit: [
+        {
+          id: "audit-1",
+          action: "recording.synthetic_processed",
+          actorId: "demo-clinician",
+          occurredAt: "2026-07-26T08:00:00.000Z",
+          detail: { syntheticDemo: true }
+        }
+      ]
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/patients")) {
+        return { ok: true, json: async () => [demoEncounter.patient] };
+      }
+      if (url.includes("/complete-example-recording")) {
+        return {
+          ok: true,
+          json: async () => ({ status: "completed", encounter: processedEncounter })
+        };
+      }
+      if (url.includes("/patient-summary-handoff")) {
+        expect(JSON.parse(String(init?.body))).toEqual({ languageCode: "hi-IN" });
+        return {
+          ok: true,
+          json: async () => ({
+            sourceText: processedEncounter.customerSummary,
+            translatedText:
+              "आपकी पीएसी रिकॉर्डिंग डॉक्टर की समीक्षा के लिए तैयार है।",
+            languageCode: "hi-IN",
+            audioBase64: "aGVsbG8=",
+            audioMimeType: "audio/mpeg"
+          })
+        };
+      }
+      return { ok: true, json: async () => demoEncounter };
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    render(<App />);
+    await user.type(await screen.findByLabelText(/find patient/i), "demo");
+    await user.click(
+      await screen.findByRole("button", { name: /demo patient/i })
+    );
+    await user.click(
+      screen.getByRole("button", { name: /upload complete synthetic recording/i })
+    );
+
+    expect(
+      await screen.findByRole("region", { name: /customer summary drawer/i })
+    ).toHaveTextContent(/ready for doctor review/i);
+    await user.selectOptions(
+      screen.getByLabelText(/patient language/i),
+      "hi-IN"
+    );
+    await user.click(
+      screen.getByRole("button", { name: /generate patient audio/i })
+    );
+
+    expect(await screen.findByText(/आपकी पीएसी रिकॉर्डिंग/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/play patient summary audio/i)).toHaveAttribute(
+      "src",
+      "data:audio/mpeg;base64,aGVsbG8="
     );
   });
 

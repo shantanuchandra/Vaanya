@@ -45,6 +45,53 @@ export function normalizeDatabaseTimestamp(value: string): string {
   return new Date(value).toISOString();
 }
 
+type PersistedChecklistSuggestion = {
+  id: string;
+  category_id: string;
+  question: string;
+  rationale: string;
+  approval_state: string;
+};
+
+type PersistedChecklistLibraryRow = {
+  organization_id: string;
+  normalized_procedure: string;
+  version: number;
+  source: string;
+  content: { items: unknown };
+  published_by: string;
+};
+
+export function checklistExtensionsFromPersistence(input: {
+  library: PersistedChecklistLibraryRow | null;
+  suggestions: PersistedChecklistSuggestion[];
+}) {
+  if (input.library) {
+    return ChecklistLibraryVersionSchema.parse({
+      organizationId: input.library.organization_id,
+      normalizedProcedure: input.library.normalized_procedure,
+      version: input.library.version,
+      source: input.library.source,
+      publishedBy: input.library.published_by,
+      items: input.library.content.items
+    }).items;
+  }
+  return input.suggestions
+    .filter(suggestion => suggestion.approval_state === "approved")
+    .map(suggestion => ({
+      id: suggestion.id,
+      categoryId: suggestion.category_id,
+      label: suggestion.question,
+      question: suggestion.question,
+      rationale: suggestion.rationale,
+      required: false as const,
+      authority: "evidence_or_clinician" as const,
+      severity: "standard" as const,
+      deferrable: true as const,
+      applicability: { kind: "always" as const }
+    }));
+}
+
 export function transcriptRowsToInsert(
   encounterId: number,
   transcript: Encounter["transcript"],
@@ -159,7 +206,8 @@ export class SupabaseEncounterStore implements EncounterStore {
       proposalsResult,
       consentResult,
       auditResult,
-      suggestionsResult
+      suggestionsResult,
+      libraryResult
     ] = await Promise.all([
         this.client
           .from("transcript_segments")
@@ -193,7 +241,22 @@ export class SupabaseEncounterStore implements EncounterStore {
             "id,model_run_id,procedure_name,category_id,question,rationale,approval_state,decided_by,decided_at"
           )
           .eq("encounter_id", encounter.id)
-          .order("created_at")
+          .order("created_at"),
+        encounter.checklist_library_procedure &&
+        encounter.checklist_library_version
+          ? this.client
+              .from("pac_checklist_library_versions")
+              .select(
+                "organization_id,normalized_procedure,version,source,content,published_by"
+              )
+              .eq("organization_id", encounter.organization_id)
+              .eq(
+                "normalized_procedure",
+                encounter.checklist_library_procedure
+              )
+              .eq("version", encounter.checklist_library_version)
+              .maybeSingle()
+          : Promise.resolve({ data: null, error: null })
       ]);
 
     for (const [label, result] of [
@@ -201,7 +264,8 @@ export class SupabaseEncounterStore implements EncounterStore {
       ["proposals", proposalsResult],
       ["consent", consentResult],
       ["audit", auditResult],
-      ["suggestions", suggestionsResult]
+      ["suggestions", suggestionsResult],
+      ["checklist library", libraryResult]
     ] as const) {
       if (result.error)
         throw new Error(`Supabase ${label} read failed: ${result.error.message}`);
@@ -272,20 +336,10 @@ export class SupabaseEncounterStore implements EncounterStore {
           ? { decidedAt: normalizeDatabaseTimestamp(suggestion.decided_at) }
           : {})
       })),
-      checklistExtensions: (suggestionsResult.data ?? [])
-        .filter(suggestion => suggestion.approval_state === "approved")
-        .map(suggestion => ({
-          id: suggestion.id,
-          categoryId: suggestion.category_id,
-          label: suggestion.question,
-          question: suggestion.question,
-          rationale: suggestion.rationale,
-          required: false,
-          authority: "evidence_or_clinician",
-          severity: "standard",
-          deferrable: true,
-          applicability: { kind: "always" }
-        })),
+      checklistExtensions: checklistExtensionsFromPersistence({
+        library: libraryResult.data,
+        suggestions: suggestionsResult.data ?? []
+      }),
       customerSummary,
       requiredFieldIds: (proposalsResult.data ?? [])
         .filter(proposal => proposal.required)

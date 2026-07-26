@@ -1,11 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
-  Check,
   CircleAlert,
   FileCheck2,
   Languages,
-  Link2,
   Mic2,
   Radio,
   ShieldCheck,
@@ -16,36 +14,44 @@ import {
 } from "lucide-react";
 import type {
   Encounter,
-  FieldState,
   PatientSummary,
-  RecordingListItem,
   TranscriptTurn
 } from "@vaanaya/contracts";
+import { evaluateChecklist } from "@vaanaya/contracts";
 import {
   createEncounterRequest,
+  decideChecklistSuggestionRequest,
+  deferChecklistItemRequest,
+  enterChecklistItemRequest,
   processCompleteExampleRecording,
   createKannadaHandoff,
+  createPatientSummaryHandoff,
   getEncounter,
-  getRecordings,
+  publishChecklistSuggestionsRequest,
   requestSecondOpinion,
   resolveField,
   searchPatients,
   signEncounterRequest,
-  type KannadaHandoff
+  type KannadaHandoff,
+  type PatientSummaryHandoff,
+  type PatientSummaryLanguageCode
 } from "./api";
-import { RecordingsPage } from "./RecordingsPage";
+import { PacChecklist } from "./PacChecklist";
 import { SpeechCapture } from "./SpeechCapture";
 import "./styles.css";
 
-const statusLabels: Record<FieldState, string> = {
-  captured: "Captured",
-  uncertain: "Needs confirmation",
-  missing: "Missing",
-  intentionally_skipped: "Intentionally skipped",
-  clinician_entered: "Clinician confirmed"
-};
 const COMPLETE_SYNTHETIC_RECORDING_FILENAME =
   "WhatsApp Audio 2026-07-26 at 09.14.01.mp4";
+const patientSummaryLanguages: Array<{
+  code: PatientSummaryLanguageCode;
+  label: string;
+}> = [
+  { code: "en-IN", label: "English" },
+  { code: "hi-IN", label: "Hindi" },
+  { code: "kn-IN", label: "Kannada" },
+  { code: "ta-IN", label: "Tamil" },
+  { code: "te-IN", label: "Telugu" }
+];
 
 function formatOffset(seconds: number) {
   const minutes = Math.floor(seconds / 60);
@@ -90,21 +96,23 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [recordingAction, setRecordingAction] = useState<"complete" | null>(null);
   const [handoff, setHandoff] = useState<KannadaHandoff | null>(null);
+  const [patientSummaryLanguage, setPatientSummaryLanguage] =
+    useState<PatientSummaryLanguageCode>("hi-IN");
+  const [patientSummaryHandoff, setPatientSummaryHandoff] =
+    useState<PatientSummaryHandoff | null>(null);
   const [summaryEmailSent, setSummaryEmailSent] = useState(false);
-  const [conversationFilter, setConversationFilter] = useState<
-    "all" | "second-opinion"
-  >("all");
-  const [page, setPage] = useState<"review" | "recordings">("review");
-  const [recordings, setRecordings] = useState<RecordingListItem[]>([]);
-  const [recordingsLoading, setRecordingsLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
-    getEncounter("demo")
+    const encounterId =
+      new URLSearchParams(window.location.search).get("encounter") ?? "demo";
+    getEncounter(encounterId)
       .then(data => {
         if (!active) return;
         setEncounter(data);
         setSelectedField(data.proposals[0]?.id ?? null);
+        setSelectedPatient(data.patient ?? null);
+        setProcedure(data.procedure);
       })
       .catch(error => {
         if (active)
@@ -145,21 +153,30 @@ function App() {
   const selectedProposal = encounter?.proposals.find(
     proposal => proposal.id === selectedField
   );
-  const sourceIds = useMemo(
-    () => new Set(selectedProposal?.sourceTurnIds ?? []),
-    [selectedProposal]
+  const displayedChecklist = useMemo(() => {
+    if (!encounter) return null;
+    return (
+      encounter.checklist ??
+      evaluateChecklist({
+        procedure: encounter.procedure,
+        contextFlags: encounter.checklistContext.contextFlags,
+        proposals: encounter.proposals,
+        transcript: encounter.transcript,
+        additionalItems: encounter.checklistExtensions
+      })
+    );
+  }, [encounter]);
+  const selectedChecklistItem = displayedChecklist?.items.find(
+    item => item.id === selectedField
   );
-  const unresolvedRequired =
-    encounter?.proposals.filter(
-      proposal =>
-        proposal.required &&
-        ["uncertain", "missing"].includes(proposal.state)
-    ) ?? [];
-  const conversations = encounter ? [encounter] : [];
-  const visibleConversations = conversations.filter(conversation =>
-    conversationFilter === "second-opinion"
-      ? conversation.secondOpinionRequested
-      : true
+  const sourceIds = useMemo(
+    () =>
+      new Set(
+        selectedChecklistItem?.sourceTurnIds ??
+          selectedProposal?.sourceTurnIds ??
+          []
+      ),
+    [selectedChecklistItem, selectedProposal]
   );
   const hasSyntheticProcessedRecording = Boolean(
     encounter?.audit.some(
@@ -170,20 +187,86 @@ function App() {
   );
 
   async function confirmSelectedField() {
-    if (!encounter || !selectedProposal || !resolution.trim()) return;
+    if (!encounter || !selectedChecklistItem || !resolution.trim()) return;
     setBusy(true);
     setNotice(null);
     try {
-      const updated = await resolveField(
-        encounter.id,
-        selectedProposal.id,
-        resolution
-      );
+      const updated =
+        selectedProposal?.state === "uncertain"
+          ? await resolveField(encounter.id, selectedProposal.id, resolution)
+          : await enterChecklistItemRequest(
+              encounter.id,
+              selectedChecklistItem.id,
+              resolution
+            );
       setEncounter(updated);
       setResolution("");
       setNotice("Field confirmed. The original source remains attached.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decideChecklistSuggestion(
+    suggestionId: string,
+    decision: "approve" | "reject"
+  ) {
+    if (!encounter) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await decideChecklistSuggestionRequest(
+        encounter.id,
+        suggestionId,
+        decision
+      );
+      setEncounter(updated);
+      setNotice(
+        decision === "approve"
+          ? "Question approved for this PAC. Publish it to reuse for this procedure."
+          : "Question rejected and excluded from this PAC."
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deferSelectedChecklistItem() {
+    if (!encounter || !selectedChecklistItem || !resolution.trim()) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await deferChecklistItemRequest(
+        encounter.id,
+        selectedChecklistItem.id,
+        resolution
+      );
+      setEncounter(updated);
+      setResolution("");
+      setNotice("Checklist item deferred with the clinician’s reason recorded.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Deferral failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function publishChecklistSuggestions() {
+    if (!encounter) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await publishChecklistSuggestionsRequest(encounter.id);
+      setEncounter(updated);
+      setNotice(
+        `Procedure checklist v${updated.checklistLibrary?.version ?? 1} published to the organization library.`
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Publish failed.");
     } finally {
       setBusy(false);
     }
@@ -253,53 +336,6 @@ function App() {
     }
   }
 
-  async function showRecordings() {
-    setPage("recordings");
-    setRecordingsLoading(true);
-    setNotice(null);
-    try {
-      setRecordings(await getRecordings());
-    } catch (error) {
-      setNotice(
-        error instanceof Error ? error.message : "Recordings unavailable."
-      );
-    } finally {
-      setRecordingsLoading(false);
-    }
-  }
-
-  async function openRecording(encounterId: string) {
-    setBusy(true);
-    try {
-      const selected = await getEncounter(encounterId);
-      setEncounter(selected);
-      setSelectedPatient(selected.patient ?? null);
-      setSelectedField(selected.proposals[0]?.id ?? null);
-      setProcedure(selected.procedure);
-      setPage("review");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Encounter unavailable.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function processRecording(encounterId: string) {
-    setRecordingsLoading(true);
-    try {
-      const result = await processCompleteExampleRecording(encounterId);
-      setEncounter(result.encounter);
-      setSelectedPatient(result.encounter.patient ?? null);
-      setSelectedField(result.encounter.proposals[0]?.id ?? null);
-      setProcedure(result.encounter.procedure);
-      setPage("review");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Recording failed.");
-    } finally {
-      setRecordingsLoading(false);
-    }
-  }
-
   async function raiseSecondOpinion() {
     if (!encounter) return;
     setBusy(true);
@@ -307,8 +343,7 @@ function App() {
     try {
       const updated = await requestSecondOpinion(encounter.id);
       setEncounter(updated);
-      setConversationFilter("second-opinion");
-      setNotice("2nd opinion requested. This PAC is now highlighted in listings.");
+      setNotice("2nd opinion requested. This PAC is now highlighted in conversation listings.");
     } catch (error) {
       setNotice(
         error instanceof Error
@@ -325,6 +360,28 @@ function App() {
     const recipient = encounter.patient?.displayName ?? encounter.patientReference;
     setSummaryEmailSent(true);
     setNotice(`Mock email queued for ${recipient}.`);
+  }
+
+  async function generatePatientSummaryAudio() {
+    if (!encounter?.customerSummary) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const generated = await createPatientSummaryHandoff(
+        encounter.id,
+        patientSummaryLanguage
+      );
+      setPatientSummaryHandoff(generated);
+      setNotice("Patient-language summary audio is ready.");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Patient summary audio could not be generated."
+      );
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!encounter) {
@@ -347,12 +404,12 @@ function App() {
           </span>
         </a>
         <nav className="topbar-nav" aria-label="Workspace navigation">
-          <button type="button" onClick={() => setPage("review")}>
+          <a href="/">
             Review workspace
-          </button>
-          <button type="button" onClick={showRecordings}>
+          </a>
+          <a href="/recordings">
             Recordings
-          </button>
+          </a>
         </nav>
         <div className="encounter-state">
           <span className="live-dot" />
@@ -366,15 +423,7 @@ function App() {
         </button>
       </header>
 
-      {page === "recordings" ? (
-        <RecordingsPage
-          recordings={recordings}
-          loading={recordingsLoading}
-          onOpen={openRecording}
-          onProcess={processRecording}
-        />
-      ) : (
-      <main>
+      <main className="review-page">
         <section className="patient-workflow" aria-label="Patient PAC workflow">
           <div className="patient-search">
             <label>
@@ -401,7 +450,10 @@ function App() {
                   onClick={() => setSelectedPatient(patient)}
                 >
                   <strong>{patient.displayName}</strong>
-                  <small>mobile ending {patient.mobileLast4}</small>
+                  <small>
+                    {patient.sex ? `${capitalize(patient.sex)} · ` : ""}
+                    mobile ending {patient.mobileLast4}
+                  </small>
                 </button>
               ))}
             </div>
@@ -447,55 +499,6 @@ function App() {
                 ? "2nd opinion requested"
                 : "Ask for 2nd opinion"}
             </button>
-          </div>
-        </section>
-
-        <section className="conversation-listing" aria-label="PAC conversation listings">
-          <div className="listing-header">
-            <div>
-              <span className="section-label">Conversation listings</span>
-              <h2>PAC conversations</h2>
-            </div>
-            <div className="listing-filters" aria-label="Conversation filters">
-              <button
-                type="button"
-                className={conversationFilter === "all" ? "is-active" : ""}
-                onClick={() => setConversationFilter("all")}
-              >
-                All
-              </button>
-              <button
-                type="button"
-                className={
-                  conversationFilter === "second-opinion" ? "is-active" : ""
-                }
-                onClick={() => setConversationFilter("second-opinion")}
-              >
-                Needs 2nd opinion
-              </button>
-            </div>
-          </div>
-          <div className="conversation-cards">
-            {visibleConversations.map(conversation => (
-              <article
-                key={conversation.id}
-                className={
-                  conversation.secondOpinionRequested
-                    ? "conversation-card needs-second-opinion"
-                    : "conversation-card"
-                }
-              >
-                <div>
-                  <strong>{conversation.patient?.displayName ?? conversation.patientReference}</strong>
-                  <small>{conversation.procedure}</small>
-                </div>
-                {conversation.secondOpinionRequested ? (
-                  <span className="second-opinion-badge">2nd opinion raised</span>
-                ) : (
-                  <span className="conversation-status">Standard review</span>
-                )}
-              </article>
-            ))}
           </div>
         </section>
 
@@ -572,66 +575,52 @@ function App() {
               </div>
               <div className="completeness">
                 <strong>
-                  {encounter.proposals.length - unresolvedRequired.length}/
-                  {encounter.proposals.length}
+                  {displayedChecklist?.answeredCount ?? 0}/
+                  {displayedChecklist?.applicableCount ?? 0}
                 </strong>
-                fields ready
+                questions answered
               </div>
             </div>
 
-            <div className="field-list">
-              {encounter.proposals.map((proposal, index) => (
-                <article
-                  className={`pac-field ${
-                    selectedField === proposal.id ? "is-selected" : ""
-                  } ${proposal.state === "uncertain" ? "is-uncertain" : ""}`}
-                  key={proposal.id}
-                >
-                  <button
-                    className="field-main"
-                    type="button"
-                    onClick={() => setSelectedField(proposal.id)}
-                  >
-                    <span className="field-number">
-                      {String(index + 1).padStart(2, "0")}
-                    </span>
-                    <span className="field-content">
-                      <span className="field-title-row">
-                        <strong>{proposal.label}</strong>
-                        <span className={`field-status ${proposal.state}`}>
-                          {proposal.state === "uncertain" ? (
-                            <CircleAlert size={14} />
-                          ) : (
-                            <Check size={14} />
-                          )}
-                          {statusLabels[proposal.state]}
-                        </span>
-                      </span>
-                      <span className="field-value">{proposal.value}</span>
-                    </span>
-                  </button>
-                  <button
-                    className="source-link"
-                    type="button"
-                    onClick={() => setSelectedField(proposal.id)}
-                    aria-label={`View source for ${proposal.label}`}
-                  >
-                    <Link2 size={14} />
-                    {proposal.sourceTurnIds.join(", ")}
-                  </button>
-                </article>
-              ))}
-            </div>
+            {displayedChecklist ? (
+              <PacChecklist
+                checklist={displayedChecklist}
+                suggestions={encounter.checklistSuggestions}
+                checklistLibrary={encounter.checklistLibrary}
+                selectedItemId={selectedField}
+                onSelectItem={itemId => {
+                  setSelectedField(itemId);
+                  setResolution("");
+                }}
+                onApproveSuggestion={suggestionId =>
+                  void decideChecklistSuggestion(suggestionId, "approve")
+                }
+                onRejectSuggestion={suggestionId =>
+                  void decideChecklistSuggestion(suggestionId, "reject")
+                }
+                onPublishSuggestions={() =>
+                  void publishChecklistSuggestions()
+                }
+              />
+            ) : null}
 
-            {selectedProposal?.state === "uncertain" && (
+            {selectedChecklistItem &&
+              ["uncertain", "missing", "clinician_required"].includes(
+                selectedChecklistItem.status
+              ) && (
               <div className="resolution-drawer">
                 <div>
                   <span className="section-label">Raksha clarification</span>
-                  <h3>Confirm the exact medicine</h3>
-                  <p>
-                    Ask for the strip or prescription. Do not infer aspirin,
-                    clopidogrel, dose, or an instruction from “blood thinner.”
-                  </p>
+                  <h3>{selectedChecklistItem.label}</h3>
+                  <p>{selectedChecklistItem.question}</p>
+                  {selectedChecklistItem.clarificationGuidance ? (
+                    <p>{selectedChecklistItem.clarificationGuidance}</p>
+                  ) : null}
+                  {selectedChecklistItem.prohibition ? (
+                    <p className="prohibition-note">
+                      {selectedChecklistItem.prohibition}
+                    </p>
+                  ) : null}
                 </div>
                 <label>
                   Clinician-confirmed entry
@@ -650,6 +639,16 @@ function App() {
                 >
                   Confirm field <ArrowRight size={16} />
                 </button>
+                {selectedChecklistItem.deferrable ? (
+                  <button
+                    className="defer-button"
+                    type="button"
+                    onClick={deferSelectedChecklistItem}
+                    disabled={!resolution.trim() || busy}
+                  >
+                    Defer with this reason
+                  </button>
+                ) : null}
               </div>
             )}
 
@@ -662,15 +661,65 @@ function App() {
                   <span className="section-label">Customer summary</span>
                   <h3>Simple note for patient</h3>
                   <p>{encounter.customerSummary}</p>
+                  {patientSummaryHandoff ? (
+                    <div className="patient-language-output">
+                      <strong>
+                        {
+                          patientSummaryLanguages.find(
+                            language =>
+                              language.code === patientSummaryHandoff.languageCode
+                          )?.label
+                        }{" "}
+                        summary
+                      </strong>
+                      <p lang={patientSummaryHandoff.languageCode}>
+                        {patientSummaryHandoff.translatedText}
+                      </p>
+                      <audio
+                        aria-label="Play patient summary audio"
+                        controls
+                        src={`data:${patientSummaryHandoff.audioMimeType};base64,${patientSummaryHandoff.audioBase64}`}
+                      />
+                    </div>
+                  ) : null}
                 </div>
-                <button
-                  className="handoff-button"
-                  type="button"
-                  onClick={mockEmailCustomerSummary}
-                  disabled={summaryEmailSent}
-                >
-                  {summaryEmailSent ? "Mock email sent" : "Mock email summary"}
-                </button>
+                <div className="summary-actions">
+                  <label>
+                    Patient language
+                    <select
+                      value={patientSummaryLanguage}
+                      onChange={event => {
+                        setPatientSummaryLanguage(
+                          event.target.value as PatientSummaryLanguageCode
+                        );
+                        setPatientSummaryHandoff(null);
+                      }}
+                    >
+                      {patientSummaryLanguages.map(language => (
+                        <option key={language.code} value={language.code}>
+                          {language.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="handoff-button"
+                    type="button"
+                    onClick={generatePatientSummaryAudio}
+                    disabled={busy}
+                  >
+                    <Volume2 size={16} />
+                    Generate patient audio
+                  </button>
+                  <button
+                    className="handoff-button secondary"
+                    type="button"
+                    onClick={mockEmailCustomerSummary}
+                    disabled={summaryEmailSent}
+                  >
+                    {summaryEmailSent ? "Mock email sent" : "Mock email summary"}
+                  </button>
+                </div>
               </section>
             )}
 
@@ -696,7 +745,7 @@ function App() {
                   type="button"
                   onClick={signNote}
                   disabled={
-                    unresolvedRequired.length > 0 ||
+                    displayedChecklist?.readyForSignoff !== true ||
                     busy ||
                     encounter.state === "signed"
                   }
@@ -748,7 +797,6 @@ function App() {
           </section>
         </section>
       </main>
-      )}
     </div>
   );
 }
@@ -761,6 +809,10 @@ function patientMatchesQuery(patient: PatientSummary, query: string) {
     patient.mobileNumber.includes(normalizedQuery) ||
     patient.mobileLast4.includes(normalizedQuery)
   );
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 export default App;

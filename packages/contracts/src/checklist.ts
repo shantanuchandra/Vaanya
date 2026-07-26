@@ -364,12 +364,48 @@ const items: ChecklistItemDefinition[] = [
     applicability: forFamilies("laparoscopic_abdominal")
   }),
   item({
+    id: "recent_abdominal_symptoms",
+    categoryId: "procedure_specific",
+    label: "Recent relevant abdominal symptoms",
+    question: "Were recent relevant abdominal symptoms discussed?",
+    rationale: "Synthetic modifier for laparoscopic abdominal documentation.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("laparoscopic_abdominal")
+  }),
+  item({
     id: "bleeding_history",
     categoryId: "procedure_specific",
     label: "Bleeding-history evidence",
     question: "Was reported bleeding history documented?",
     rationale: "Synthetic modifier for hysterectomy documentation.",
     required: true,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("hysterectomy")
+  }),
+  item({
+    id: "anemia_investigation",
+    categoryId: "procedure_specific",
+    label: "Mentioned anaemia investigation",
+    question: "Was any patient-reported or mentioned anaemia investigation documented?",
+    rationale: "Synthetic modifier for hysterectomy documentation; it does not prescribe testing.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("hysterectomy")
+  }),
+  item({
+    id: "pelvic_procedure_history",
+    categoryId: "procedure_specific",
+    label: "Prior pelvic procedure history",
+    question: "Was prior pelvic procedure history discussed?",
+    rationale: "Synthetic modifier for hysterectomy documentation.",
+    required: false,
     authority: "evidence_or_clinician",
     severity: "standard",
     deferrable: true,
@@ -398,6 +434,61 @@ const items: ChecklistItemDefinition[] = [
     severity: "standard",
     deferrable: true,
     applicability: forFamilies("upper_gi_endoscopy")
+  }),
+  item({
+    id: "procedure_medicine_reconciliation",
+    categoryId: "procedure_specific",
+    label: "Procedure-focused medicine reconciliation",
+    question: "Was current medicine reconciliation documented for the selected procedure?",
+    rationale: "Synthetic documentation reminder; it does not provide medicine instructions.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies(
+      "knee_replacement",
+      "urological",
+      "cataract",
+      "breast"
+    ),
+    prohibition: "Do not infer medicine changes or peri-procedure instructions."
+  }),
+  item({
+    id: "procedure_allergy_reconciliation",
+    categoryId: "procedure_specific",
+    label: "Procedure-focused allergy reconciliation",
+    question: "Was allergy and reaction reconciliation documented for the selected procedure?",
+    rationale: "Synthetic documentation reminder for the selected procedure.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("cataract", "breast")
+  }),
+  item({
+    id: "procedure_previous_anesthesia_review",
+    categoryId: "procedure_specific",
+    label: "Procedure-focused previous anesthesia review",
+    question: "Was previous anesthesia history reviewed for the selected procedure?",
+    rationale: "Synthetic documentation reminder for the selected procedure.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("urological", "breast")
+  }),
+  item({
+    id: "upper_gi_reported_fasting",
+    categoryId: "procedure_specific",
+    label: "Upper-GI reported fasting statement",
+    question: "Was the patient's reported intake and timing documented for this procedure?",
+    rationale: "Synthetic documentation reminder; the clinician determines significance.",
+    required: false,
+    authority: "evidence_or_clinician",
+    severity: "standard",
+    deferrable: true,
+    applicability: forFamilies("upper_gi_endoscopy"),
+    prohibition: "Do not approve fasting or issue intake instructions."
   }),
   item({
     id: "open_items",

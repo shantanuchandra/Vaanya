@@ -129,6 +129,39 @@ describe("workflow transitions", () => {
     expect(updated.audit.at(-1)?.action).toBe("checklist.item_entered");
   });
 
+  it("allows clinician entry for an approved procedure-library item", () => {
+    const extended = EncounterSchema.parse({
+      ...encounter,
+      checklistExtensions: [
+        {
+          id: "library-airway-history",
+          categoryId: "history",
+          label: "Procedure-specific airway history",
+          question: "Was the reported airway history discussed?",
+          rationale: "Clinician-approved procedure documentation question.",
+          required: false,
+          authority: "evidence_or_clinician",
+          severity: "standard",
+          deferrable: true,
+          applicability: { kind: "always" }
+        }
+      ]
+    });
+
+    const updated = enterChecklistItem(extended, {
+      itemId: "library-airway-history",
+      value: "Clinician reviewed and documented the reported history.",
+      actorId: "clinician-1"
+    });
+
+    expect(
+      updated.checklist?.items.find(item => item.id === "library-airway-history")
+    ).toMatchObject({
+      status: "answered",
+      value: "Clinician reviewed and documented the reported history."
+    });
+  });
+
   it("rejects deferral of the clinician conclusion", () => {
     expect(() =>
       deferChecklistItem(encounter, {

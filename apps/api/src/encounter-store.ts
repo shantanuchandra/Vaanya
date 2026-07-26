@@ -87,7 +87,8 @@ export function recordingListItem(encounter: Encounter): RecordingListItem {
     answeredCount: checklist.answeredCount,
     applicableCount,
     criticalGapCount: checklist.blockingGapCount,
-    hasTranscript: encounter.transcript.length > 0
+    hasTranscript: encounter.transcript.length > 0,
+    secondOpinionRequested: encounter.secondOpinionRequested
   };
 }
 
