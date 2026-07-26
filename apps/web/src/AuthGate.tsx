@@ -19,16 +19,19 @@ export function AuthGate({
 
   useEffect(() => {
     if (!auth) {
+      setAccessTokenProvider(async () => null);
       setReady(true);
       return;
     }
     let active = true;
     auth.getSession().then(next => {
       if (!active) return;
+      setAccessTokenProvider(async () => next?.accessToken ?? null);
       setSession(next);
       setReady(true);
     });
     const unsubscribe = auth.onChange(next => {
+      setAccessTokenProvider(async () => next?.accessToken ?? null);
       setSession(next);
       setReady(true);
     });
@@ -37,10 +40,6 @@ export function AuthGate({
       unsubscribe();
     };
   }, [auth]);
-
-  useEffect(() => {
-    setAccessTokenProvider(async () => session?.accessToken ?? null);
-  }, [session]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
