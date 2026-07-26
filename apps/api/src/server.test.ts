@@ -25,6 +25,32 @@ afterEach(async () => {
 });
 
 describe("encounter API", () => {
+  it("returns the synthetic recordings worklist in processing priority order", async () => {
+    const server = await buildServer({ authenticator: testAuthenticator });
+    servers.push(server);
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/recordings",
+      headers: authorized
+    });
+
+    expect(response.statusCode).toBe(200);
+    const items = response.json();
+    expect(items).toHaveLength(10);
+    expect(items[0]).toMatchObject({
+      synthetic: true,
+      status: "uploaded",
+      patient: { displayName: "Kavya Nair" }
+    });
+    expect(
+      items.map(
+        (item: { patient: { displayName: string } }) =>
+          item.patient.displayName
+      )
+    ).toContain("Ananya Rao");
+  });
+
   it("rejects protected encounter access without a bearer token", async () => {
     const server = await buildServer({
       authenticator: {
@@ -473,20 +499,24 @@ describe("encounter API", () => {
       openAiPacClient: {
         structurePacConversation: async input => {
           openAiSegments.push(input);
-          return [
-            {
-              segmentId: "seg-1",
-              speakerRole: "clinician",
-              topic: "medications",
-              uncertainty: false
-            },
-            {
-              segmentId: "seg-2",
-              speakerRole: "patient",
-              topic: "medications",
-              uncertainty: true
-            }
-          ];
+          return {
+            customerSummary:
+              "Your pre-anaesthetic check-up was recorded for doctor review. Please bring your blood thinner strip because the exact name was not remembered.",
+            turns: [
+              {
+                segmentId: "seg-1",
+                speakerRole: "clinician",
+                topic: "medications",
+                uncertainty: false
+              },
+              {
+                segmentId: "seg-2",
+                speakerRole: "patient",
+                topic: "medications",
+                uncertainty: true
+              }
+            ]
+          };
         }
       }
     });
@@ -497,8 +527,22 @@ describe("encounter API", () => {
       url: "/api/encounters/demo/complete-example-recording",
       headers: authorized
     });
+    const cachedResponse = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/complete-example-recording",
+      headers: authorized
+    });
 
     expect(response.statusCode).toBe(200);
+    expect(cachedResponse.statusCode).toBe(200);
+    expect(cachedResponse.json()).toMatchObject({
+      status: "cached",
+      encounter: {
+        transcript: response.json().encounter.transcript
+      }
+    });
+    expect(sarvamInputs).toHaveLength(1);
+    expect(openAiSegments).toHaveLength(1);
     expect(sarvamInputs[0]).toMatchObject({
       filename: "WhatsApp Audio 2026-07-26 at 09.14.01.mp4",
       mimeType: "audio/mp4",
@@ -507,6 +551,9 @@ describe("encounter API", () => {
     expect(Buffer.compare(Buffer.from(sarvamInputs[0]?.bytes ?? []), fullBytes)).toBe(0);
     expect(openAiSegments[0]).toEqual(segments);
     expect(response.json()).toMatchObject({ status: "completed" });
+    expect(response.json().encounter.customerSummary).toContain(
+      "pre-anaesthetic check-up"
+    );
     expect(response.json().encounter.transcript).toContainEqual(
       expect.objectContaining({
         id: "seg-2",
@@ -524,6 +571,7 @@ describe("encounter API", () => {
           syntheticDemo: true,
           sarvamRequestId: "sarvam-batch-1",
           segmentCount: 2,
+          customerSummaryGenerated: true,
           topicCounts: { medications: 2 }
         })
       })
