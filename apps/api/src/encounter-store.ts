@@ -61,6 +61,8 @@ export function recordingListItem(encounter: Encounter): RecordingListItem {
       .find((value): value is string => typeof value === "string") ??
     encounter.audit[0]?.occurredAt ??
     "2026-07-26T00:00:00.000Z";
+  const applicableCount = Math.max(1, applicable.length);
+  const status = recordingStatus(encounter);
   return {
     encounterId: encounter.id,
     patient: encounter.patient,
@@ -68,16 +70,19 @@ export function recordingListItem(encounter: Encounter): RecordingListItem {
     procedure: encounter.procedure,
     preferredLanguage: encounter.preferredLanguage,
     recordedAt,
-    status: recordingStatus(encounter),
+    status,
     answeredCount: applicable.filter(item =>
       ["captured", "clinician_entered", "intentionally_skipped"].includes(
         item.state
       )
     ).length,
-    applicableCount: Math.max(1, applicable.length),
-    criticalGapCount: applicable.filter(item =>
-      ["uncertain", "missing"].includes(item.state)
-    ).length,
+    applicableCount,
+    criticalGapCount:
+      status === "uploaded"
+        ? applicableCount
+        : applicable.filter(item =>
+            ["uncertain", "missing"].includes(item.state)
+          ).length,
     hasTranscript: encounter.transcript.length > 0
   };
 }
