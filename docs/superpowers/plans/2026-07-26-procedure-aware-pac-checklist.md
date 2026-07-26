@@ -20,6 +20,9 @@
 - Required `uncertain`, `missing`, and `clinician_required` items block signing.
 - Deferral requires a clinician reason and is forbidden for identity, procedure, consent, and clinician conclusion.
 - OpenAI may propose values and sources; it may not determine applicability, requirement level, diagnosis, management or sign-off.
+- Unknown procedures may receive at most five optional, non-blocking OpenAI suggestions.
+- Only a clinician may approve, reject or publish suggestions to the organization-scoped checklist library.
+- Published library versions are immutable and cannot overwrite seeded procedure families.
 - Existing Evidence Rail remains the only transcript-source viewer.
 - Existing user recordings and `.superpowers/` files are never modified or committed.
 
@@ -39,6 +42,8 @@
 - Modify `apps/api/src/openai-client.test.ts`: verify bounded stable IDs enter the OpenAI request.
 - Create `apps/api/src/checklist-proposals.ts`: validate model/topic output and materialize applicable proposal states without silent inference.
 - Create `apps/api/src/checklist-proposals.test.ts`: unknown ID, invalid source and missing-item behavior.
+- Create `apps/api/src/unknown-procedure-checklist.ts`: sanitize bounded OpenAI suggestions and build clinician-approved library drafts.
+- Create `apps/api/src/unknown-procedure-checklist.test.ts`: prohibited-content, bound, approval and publication behavior.
 - Modify `apps/api/src/server.ts`: checklist-aware processing, clinician entry/defer routes and versioned signed responses.
 - Modify `apps/api/src/server.test.ts`: API contract and sign-blocker integration.
 - Modify `apps/api/src/supabase-encounter-store.ts`: rehydrate checklist context and preserve version in signed notes.
@@ -453,8 +458,12 @@ git commit -m "feat: evaluate procedure checklists for demo recordings"
 - Consumes: applicable items from `EvaluatedChecklist`, `enterChecklistItem`, `deferChecklistItem`, `withEvaluatedChecklist`.
 - Produces: `PacConversationStructure.checklistProposals`,
   `materializeChecklistProposals(...)`,
+  `sanitizeUnknownProcedureSuggestions(...)`,
   `PATCH /api/encounters/:id/checklist/:itemId`, and
-  `POST /api/encounters/:id/checklist/:itemId/defer`.
+  `POST /api/encounters/:id/checklist/:itemId/defer`,
+  `POST /api/encounters/:id/checklist-suggestions/:suggestionId/approve`,
+  `POST /api/encounters/:id/checklist-suggestions/:suggestionId/reject`, and
+  `POST /api/encounters/:id/checklist-suggestions/publish`.
 
 - [ ] **Step 1: Write failing model-boundary tests**
 
@@ -491,7 +500,60 @@ Expected: FAIL because the module does not exist.
 - never generate proposals for clinician-only items;
 - copy label and `required` from the template, never from model output.
 
-- [ ] **Step 4: Write and implement the OpenAI request-context test**
+- [ ] **Step 4: Write failing unknown-procedure suggestion tests**
+
+```ts
+it("keeps at most five safe suggestions pending and non-blocking", () => {
+  const suggestions = sanitizeUnknownProcedureSuggestions({
+    procedure: "Unlisted synthetic procedure",
+    modelRunId: "run-1",
+    categoryIds: ["history"],
+    suggestions: Array.from({ length: 7 }, (_, index) => ({
+      categoryId: "history",
+      question: `Was reported history item ${index + 1} discussed?`,
+      rationale: "Procedure documentation review."
+    }))
+  });
+  expect(suggestions).toHaveLength(5);
+  expect(suggestions[0]).toMatchObject({
+    required: false,
+    severity: "standard",
+    approvalState: "pending_clinician_review"
+  });
+});
+
+it.each(["Assign ASA grade", "Order an ECG", "Stop blood thinner"])(
+  "rejects prohibited suggestion %s",
+  question => {
+    expect(sanitizeUnknownProcedureSuggestions({
+      procedure: "Unlisted synthetic procedure",
+      modelRunId: "run-1",
+      categoryIds: ["history"],
+      suggestions: [{
+        categoryId: "history",
+        question,
+        rationale: "Model suggestion"
+      }]
+    })).toEqual([]);
+  }
+);
+```
+
+- [ ] **Step 5: Implement suggestion sanitation and library-draft rules**
+
+Create `unknown-procedure-checklist.ts`. Accept existing category IDs only,
+cap results at five, derive encounter-scoped IDs from model-run ID plus
+position, and reject text matching diagnosis, ASA, fitness, anesthetic
+technique, order/test/investigation, start/stop/hold medicine, or fasting
+instruction patterns. Server-assigned fields are optional, standard,
+evidence-or-clinician, deferrable and pending clinician review.
+
+Add `approveSuggestion`, `rejectSuggestion`, and
+`buildPublishedChecklistVersion`. Publication must fail while any suggestion is
+pending, include approved suggestions only, normalize the procedure as the
+library lookup key, and increment an immutable integer version.
+
+- [ ] **Step 6: Write and implement OpenAI request-context tests**
 
 Test that `structurePacConversation(segments, checklistItems)` includes only:
 
@@ -529,7 +591,28 @@ supplied applicable list and every `sourceSegmentId` exists in the Sarvam
 segments. Pass these proposals into `materializeChecklistProposals`; retain
 `turns` for speaker and topic mapping.
 
-- [ ] **Step 5: Write failing route tests for entry, deferral and sign blockers**
+Add a separate strict-schema method:
+
+```ts
+suggestChecklistForUnknownProcedure(input: {
+  procedure: string;
+  existingItems: Array<{ itemId: string; label: string }>;
+  categoryIds: string[];
+}): Promise<{
+  modelRunId: string;
+  suggestions: Array<{
+    categoryId: string;
+    question: string;
+    rationale: string;
+  }>;
+}>
+```
+
+Call it only when procedure normalization returns `generic` and no published
+organization-library match exists. Provider failure records an audit warning
+and returns the generic checklist without failing encounter processing.
+
+- [ ] **Step 7: Write failing route tests for entry, deferral, suggestion decisions and sign blockers**
 
 ```ts
 it("allows only a clinician to enter a clinician-only item", async () => {
@@ -554,9 +637,19 @@ it("rejects a deferral without a reason", async () => {
   });
   expect(response.statusCode).toBe(400);
 });
+
+it("publishes only after every suggestion has a clinician decision", async () => {
+  const response = await server.inject({
+    method: "POST",
+    url: "/api/encounters/generic/checklist-suggestions/publish",
+    headers: clinicianHeaders
+  });
+  expect(response.statusCode).toBe(409);
+  expect(response.json().message).toMatch(/pending/i);
+});
 ```
 
-- [ ] **Step 6: Implement routes and recompute every response**
+- [ ] **Step 8: Implement routes and recompute every response**
 
 Use `request.actor!.id`; ignore caller-supplied actor IDs. Require clinician role
 for entry and deferral. Save the mutation and return
@@ -565,7 +658,11 @@ to recompute before saving. In `encounterFromDiarizedRecording`, replace the
 single hardcoded medicines proposal with `materializeChecklistProposals` using
 `structure.checklistProposals` and the generated transcript.
 
-- [ ] **Step 7: Run API tests and commit**
+Approval and rejection use `request.actor!.id`. Publication is clinician-only,
+organization-scoped and creates a new immutable version; it never updates a
+seeded template.
+
+- [ ] **Step 9: Run API tests and commit**
 
 Run:
 
@@ -577,7 +674,7 @@ npm run typecheck -w @vaanaya/api
 Expected: all API tests PASS and type-check exits 0.
 
 ```bash
-git add apps/api/src/checklist-proposals.ts apps/api/src/checklist-proposals.test.ts apps/api/src/openai-client.ts apps/api/src/openai-client.test.ts apps/api/src/server.ts apps/api/src/server.test.ts
+git add apps/api/src/checklist-proposals.ts apps/api/src/checklist-proposals.test.ts apps/api/src/unknown-procedure-checklist.ts apps/api/src/unknown-procedure-checklist.test.ts apps/api/src/openai-client.ts apps/api/src/openai-client.test.ts apps/api/src/server.ts apps/api/src/server.test.ts
 git commit -m "feat: constrain PAC structuring to applicable checklist items"
 ```
 
@@ -641,7 +738,38 @@ alter table public.encounters
   add column checklist_version text not null default 'synthetic-pac-v1',
   add column checklist_context_flags jsonb not null default '[]'::jsonb
     check (jsonb_typeof(checklist_context_flags) = 'array');
+
+create table public.pac_checklist_library_versions (
+  id bigint generated always as identity primary key,
+  organization_id uuid not null references public.organizations(id),
+  normalized_procedure text not null,
+  version integer not null check (version > 0),
+  source text not null check (source in ('seeded', 'clinician_reviewed_synthetic')),
+  content jsonb not null,
+  published_by uuid not null references auth.users(id),
+  published_at timestamptz not null default now(),
+  unique (organization_id, normalized_procedure, version)
+);
+
+create table public.pac_checklist_suggestions (
+  id uuid primary key,
+  encounter_id bigint not null references public.encounters(id) on delete cascade,
+  model_run_id text not null,
+  category_id text not null,
+  question text not null,
+  rationale text not null,
+  approval_state text not null check (
+    approval_state in ('pending_clinician_review', 'approved', 'rejected')
+  ),
+  decided_by uuid references auth.users(id),
+  decided_at timestamptz
+);
 ```
+
+Enable RLS. Organization members may read library versions; clinicians may
+insert versions. Encounter organization members may read suggestions;
+clinicians may insert/update them. Do not grant update or delete on published
+library versions.
 
 - [ ] **Step 5: Implement read/write mapping**
 
@@ -649,6 +777,11 @@ Select the three new columns in `encounterRow`, map them into
 `checklistContext`, and call `withEvaluatedChecklist` after `EncounterSchema`
 parsing. Update the encounter row only when context changes. Signed note content
 already stores the whole evaluated encounter; assert that behavior.
+
+Add store methods to find the latest library version by organization and
+normalized procedure, persist suggestion decisions, and insert a published
+version. A publish operation always inserts; it never updates an existing
+version.
 
 - [ ] **Step 6: Verify store tests and attempt the local schema gate**
 
@@ -738,6 +871,9 @@ Add:
 ```ts
 enterChecklistItemRequest(encounterId: string, itemId: string, value: string)
 deferChecklistItemRequest(encounterId: string, itemId: string, reason: string)
+approveChecklistSuggestionRequest(encounterId: string, suggestionId: string)
+rejectChecklistSuggestionRequest(encounterId: string, suggestionId: string)
+publishChecklistSuggestionsRequest(encounterId: string)
 ```
 
 Test exact PATCH/POST URLs, JSON bodies and `EncounterSchema` parsing.
@@ -752,6 +888,12 @@ signing with `encounter.checklist?.readyForSignoff !== true`.
 Keep the existing clarification drawer, but make its heading and guidance come
 from the selected checklist item instead of always saying “Confirm the exact
 medicine.”
+
+For generic procedures, render “AI-suggested questions” separately from active
+completeness. Pending rows show rationale and clinician-only Approve/Reject
+actions. After all decisions, show “Publish to organization checklist library.”
+Published entries display procedure key and immutable version. Future matching
+encounters show “Using organization checklist vN.”
 
 - [ ] **Step 6: Add responsive and accessible styles**
 

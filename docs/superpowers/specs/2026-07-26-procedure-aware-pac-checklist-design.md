@@ -142,7 +142,40 @@ The clinician-entered procedure is normalized into one of:
 - `generic`.
 
 Matching is deterministic and explainable. Unknown procedures use `generic`;
-they never silently inherit a specialist modifier.
+they never silently inherit a specialist modifier. For a generic match, OpenAI
+may propose encounter-scoped documentation questions for clinician review. The
+generic checklist remains active while those suggestions are pending.
+
+### Unknown-procedure suggestions and checklist library
+
+For `generic` procedures, OpenAI receives the clinician-reported procedure,
+active generic item IDs, existing category IDs and product prohibitions. It may
+return at most five suggested documentation questions. Each suggestion
+contains only an existing category ID, neutral question and rationale.
+
+The server assigns every suggestion:
+
+- an encounter-scoped stable ID and model-run ID;
+- requirement level `optional`;
+- severity `standard`;
+- authority `evidence_or_clinician`;
+- `deferrable: true`;
+- approval state `pending_clinician_review`.
+
+The model cannot create categories, set requirement level or activate its own
+suggestions. Pending suggestions are visible but excluded from completeness and
+sign blockers. A clinician may approve or reject each suggestion.
+
+After reviewing every suggestion, a clinician may explicitly publish the
+approved set to the organization's checklist library. Publication creates a new
+immutable library version keyed to the normalized reported procedure. Future
+encounters in the same organization may reuse that published checklist.
+Publication never overwrites the seven seeded procedure families, never crosses
+organization boundaries and never changes an already signed encounter.
+
+The published entry remains labelled `clinician_reviewed_synthetic`; it is not
+a hospital clinical protocol. OpenAI drafts and rejected suggestions remain in
+the audit trail.
 
 ### Encounter checklist
 
@@ -152,6 +185,8 @@ An encounter records:
 - selected procedure family;
 - applicable item IDs;
 - explicit clinician-selected context flags;
+- unknown-procedure suggestions and clinician decisions;
+- selected organization-library checklist ID and version when reused;
 - evaluated item results.
 
 The template remains the definition source. Encounter results reference stable
@@ -272,6 +307,12 @@ OpenAI extraction receives the applicable stable item IDs and labels. Its
 output may propose values and source turns only; it does not determine
 applicability or requirement levels.
 
+For `generic` procedures only, a separate bounded OpenAI response may suggest
+up to five questions under the rules above. A clinician decision endpoint
+approves or rejects each draft. A distinct publish endpoint creates an
+organization-scoped immutable library version after no pending suggestions
+remain.
+
 ### Web application
 
 The PAC sheet replaces the flat proposal list with category disclosure
@@ -292,20 +333,29 @@ recompute them.
 
 1. Clinician selects a procedure and optional context flags.
 2. Server normalizes the procedure family.
-3. Checklist engine computes applicable items deterministically.
-4. Recording processing sends only those item IDs and labels to OpenAI.
-5. OpenAI returns proposal values, states and source turn IDs.
-6. Server rejects unknown item IDs and invalid source links.
-7. Evaluator produces category and overall states.
-8. UI renders categories and highlights evidence.
-9. Clinician resolves uncertain or missing items.
-10. Sign endpoint recomputes the checklist and blocks unresolved requirements.
-11. Signed audit/version records the checklist template and version.
+3. For `generic`, reuse a matching published organization checklist or request
+   bounded OpenAI suggestions.
+4. Clinician approves or rejects suggestions and may publish the approved set.
+5. Checklist engine computes active applicable items deterministically.
+6. Recording processing sends only active item IDs and labels to OpenAI.
+7. OpenAI returns proposal values, states and source turn IDs.
+8. Server rejects unknown item IDs and invalid source links.
+9. Evaluator produces category and overall states.
+10. UI renders categories and highlights evidence.
+11. Clinician resolves uncertain or missing items.
+12. Sign endpoint recomputes the checklist and blocks unresolved requirements.
+13. Signed audit/version records every checklist source and version.
 
 ## Error Handling
 
 - Unknown procedure: use generic checklist and display “Generic procedure
-  coverage.”
+  coverage.” Suggestion generation is non-blocking.
+- Invalid or prohibited suggestion: reject it and append an audit warning.
+- Suggestion failure: retain the generic checklist and expose a retry action.
+- Library name collision: create a new version; never overwrite an immutable
+  published version.
+- Pending suggestion at publication: reject publication until every suggestion
+  has an explicit clinician decision.
 - Unknown OpenAI field ID: ignore it, append a structured processing warning and
   do not count it.
 - Invalid transcript source: item cannot become answered.
@@ -344,12 +394,15 @@ section for auditability.
 For the buildathon:
 
 - template definitions live in version-controlled application code;
+- seeded procedure families form the initial checklist library;
+- approved unknown-procedure drafts publish to an organization-scoped,
+  immutable checklist-library version;
 - encounter audit and signed-note content record template ID and version;
 - existing proposal/source persistence remains the answer store;
 - synthetic demo encounters use the stable memory store;
 - real encounters use Supabase when enabled.
 
-A database-administered template catalog and hospital form builder are
+A generic hospital form builder and cross-organization template marketplace are
 non-goals.
 
 ## Testing
@@ -377,6 +430,12 @@ Implementation follows test-driven development.
 - checklist evaluation survives save/reload;
 - processed recording is reused without another Sarvam/OpenAI call;
 - signed-note persistence retains checklist version.
+- unknown procedures request at most five OpenAI suggestions;
+- pending suggestions do not change completeness or signing;
+- prohibited suggestions are rejected;
+- only clinicians can approve, reject and publish;
+- published organization-library versions are reusable and immutable;
+- provider failure leaves generic coverage usable.
 
 ### UI tests
 
@@ -388,6 +447,9 @@ Implementation follows test-driven development.
 - clinician-only and synthetic-validation labels are visible;
 - sign action remains disabled while blockers exist;
 - mobile layout retains status and primary actions.
+- generic procedures show pending suggestions separately;
+- approve, reject and publish actions expose their clinician authority;
+- a later encounter can select the published library checklist.
 
 ### Live demo verification
 
@@ -426,13 +488,17 @@ Use Shantanu Chandra:
 - replacing clinician examination or conclusion;
 - streaming STT changes;
 - rebuilding the Evidence Rail;
-- production multi-tenant checklist customization.
+- arbitrary hospital form building or cross-organization checklist sharing.
 
 ## Acceptance Criteria
 
 - All seven demo procedure families instantiate deterministic checklist
   categories.
 - Generic fallback works for unknown procedures.
+- Unknown procedures receive at most five non-blocking OpenAI suggestions.
+- A clinician-approved set can publish as a reusable immutable
+  organization-library checklist version.
+- Pending suggestions never count toward completeness or block signing.
 - Every answered AI-proposed item has at least one valid transcript source.
 - Required unresolved and clinician-only items block sign-off.
 - Worklist, PAC sheet and sign endpoint use the same completeness calculation.
