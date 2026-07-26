@@ -53,6 +53,70 @@ const demoEncounter = {
 };
 
 describe("PAC review workspace", () => {
+  it("opens a recording from the worklist in the existing evidence rail", async () => {
+    const user = userEvent.setup();
+    const shantanuEncounter = {
+      ...demoEncounter,
+      patient: {
+        id: "patient-demo",
+        displayName: "Shantanu Chandra",
+        mobileNumber: "+919811110001",
+        mobileLast4: "0001"
+      },
+      patientReference: "Shantanu Chandra",
+      procedure: "Laparoscopic hernia repair"
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/recordings")) {
+          return {
+            ok: true,
+            json: async () => [
+              {
+                encounterId: "demo",
+                patient: shantanuEncounter.patient,
+                synthetic: true,
+                procedure: shantanuEncounter.procedure,
+                preferredLanguage: "hi-IN",
+                recordedAt: "2026-07-26T08:30:00.000Z",
+                status: "ready_for_review",
+                answeredCount: 3,
+                applicableCount: 4,
+                criticalGapCount: 1,
+                hasTranscript: true
+              }
+            ]
+          };
+        }
+        if (url.includes("/api/patients")) {
+          return { ok: true, json: async () => [shantanuEncounter.patient] };
+        }
+        return { ok: true, json: async () => shantanuEncounter };
+      })
+    );
+
+    render(<App />);
+    await user.click(
+      await screen.findByRole("button", { name: "Recordings" })
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Recordings" })
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: /continue review.*shantanu chandra/i
+      })
+    );
+    expect(
+      await screen.findByRole("heading", {
+        name: "Listen once. Verify precisely."
+      })
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Shantanu Chandra").length).toBeGreaterThan(0);
+  });
+
   it("lets a doctor choose a patient, upload the complete synthetic recording, and review generated next questions", async () => {
     const user = userEvent.setup();
     const patient = {
@@ -328,6 +392,56 @@ describe("PAC review workspace", () => {
     expect(screen.getByText(/Sarvam translated evidence/i)).toBeInTheDocument();
   });
 
+  it("shows the customer summary drawer and mocks sending it by email", async () => {
+    const user = userEvent.setup();
+    const processedEncounter = {
+      ...demoEncounter,
+      customerSummary:
+        "Your pre-anaesthetic check-up was recorded for doctor review. Please bring your blood thinner strip because the exact name was not remembered.",
+      audit: [
+        {
+          id: "audit-1",
+          action: "recording.synthetic_processed",
+          actorId: "demo-clinician",
+          occurredAt: "2026-07-26T08:00:00.000Z",
+          detail: { syntheticDemo: true }
+        }
+      ]
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/patients")) {
+        return { ok: true, json: async () => [demoEncounter.patient] };
+      }
+      if (url.includes("/complete-example-recording")) {
+        return {
+          ok: true,
+          json: async () => ({ status: "completed", encounter: processedEncounter })
+        };
+      }
+      return { ok: true, json: async () => demoEncounter };
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    render(<App />);
+    await user.type(await screen.findByLabelText(/find patient/i), "demo");
+    await user.click(
+      await screen.findByRole("button", { name: /demo patient/i })
+    );
+    await user.click(
+      screen.getByRole("button", { name: /upload complete synthetic recording/i })
+    );
+
+    expect(
+      await screen.findByRole("region", { name: /customer summary drawer/i })
+    ).toHaveTextContent(/bring your blood thinner strip/i);
+    await user.click(screen.getByRole("button", { name: /mock email summary/i }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /mock email queued for demo patient/i
+    );
+  });
+
   it("uploads the complete synthetic recording and shows translated diarized evidence", async () => {
     const user = userEvent.setup();
     const processedEncounter = {
@@ -414,6 +528,13 @@ describe("PAC review workspace", () => {
         name: /diarizing and translating with sarvam/i
       })
     ).toBeDisabled();
+    expect(
+      screen.getByRole("status", {
+        name: ""
+      })
+    ).toHaveTextContent(
+      "Uploading WhatsApp Audio 2026-07-26 at 09.14.01.mp4"
+    );
     resolveUpload?.({
       ok: true,
       json: async () => ({

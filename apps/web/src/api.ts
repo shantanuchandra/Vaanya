@@ -1,8 +1,10 @@
 import {
   EncounterSchema,
   PatientSummarySchema,
+  RecordingListSchema,
   type Encounter,
-  type PatientSummary
+  type PatientSummary,
+  type RecordingListItem
 } from "@vaanaya/contracts";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -42,6 +44,13 @@ export async function searchPatients(query: string): Promise<PatientSummary[]> {
   if (!response.ok) throw new Error("Patients could not be loaded.");
   if (!Array.isArray(payload)) return [];
   return payload.map(item => PatientSummarySchema.parse(item));
+}
+
+export async function getRecordings(): Promise<RecordingListItem[]> {
+  const response = await protectedFetch(`${API_BASE}/api/recordings`);
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Recordings could not be loaded.");
+  return RecordingListSchema.parse(payload);
 }
 
 export async function createPatient(input: {
