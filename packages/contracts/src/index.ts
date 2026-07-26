@@ -51,6 +51,33 @@ export const PatientSummarySchema = z.object({
 
 export type PatientSummary = z.infer<typeof PatientSummarySchema>;
 
+export const RecordingStatusSchema = z.enum([
+  "uploaded",
+  "processing",
+  "ready_for_review",
+  "signed",
+  "failed"
+]);
+
+export type RecordingStatus = z.infer<typeof RecordingStatusSchema>;
+
+export const RecordingListItemSchema = z.object({
+  encounterId: z.string().min(1),
+  patient: PatientSummarySchema,
+  synthetic: z.literal(true),
+  procedure: z.string().min(1),
+  preferredLanguage: z.string().min(2),
+  recordedAt: z.string().datetime(),
+  status: RecordingStatusSchema,
+  answeredCount: z.number().int().nonnegative(),
+  applicableCount: z.number().int().positive(),
+  criticalGapCount: z.number().int().nonnegative(),
+  hasTranscript: z.boolean()
+});
+
+export type RecordingListItem = z.infer<typeof RecordingListItemSchema>;
+export const RecordingListSchema = z.array(RecordingListItemSchema);
+
 export const RecommendationQuestionSchema = z.object({
   id: z.string().min(1),
   question: z.string().min(1),
@@ -78,6 +105,7 @@ export const EncounterSchema = z.object({
   state: EncounterStateSchema,
   consentRecorded: z.boolean(),
   sourceType: z.enum(["live", "uploaded_mp4"]).optional(),
+  customerSummary: z.string().min(1).optional(),
   secondOpinionRequested: z.boolean().optional(),
   secondOpinionRequestedBy: z.string().min(1).optional(),
   secondOpinionRequestedAt: z.string().datetime().optional(),

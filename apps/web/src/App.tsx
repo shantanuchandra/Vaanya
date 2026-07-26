@@ -18,6 +18,7 @@ import type {
   Encounter,
   FieldState,
   PatientSummary,
+  RecordingListItem,
   TranscriptTurn
 } from "@vaanaya/contracts";
 import {
@@ -25,12 +26,14 @@ import {
   processCompleteExampleRecording,
   createKannadaHandoff,
   getEncounter,
+  getRecordings,
   requestSecondOpinion,
   resolveField,
   searchPatients,
   signEncounterRequest,
   type KannadaHandoff
 } from "./api";
+import { RecordingsPage } from "./RecordingsPage";
 import { SpeechCapture } from "./SpeechCapture";
 import "./styles.css";
 
@@ -41,6 +44,8 @@ const statusLabels: Record<FieldState, string> = {
   intentionally_skipped: "Intentionally skipped",
   clinician_entered: "Clinician confirmed"
 };
+const COMPLETE_SYNTHETIC_RECORDING_FILENAME =
+  "WhatsApp Audio 2026-07-26 at 09.14.01.mp4";
 
 function formatOffset(seconds: number) {
   const minutes = Math.floor(seconds / 60);
@@ -85,9 +90,13 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [recordingAction, setRecordingAction] = useState<"complete" | null>(null);
   const [handoff, setHandoff] = useState<KannadaHandoff | null>(null);
+  const [summaryEmailSent, setSummaryEmailSent] = useState(false);
   const [conversationFilter, setConversationFilter] = useState<
     "all" | "second-opinion"
   >("all");
+  const [page, setPage] = useState<"review" | "recordings">("review");
+  const [recordings, setRecordings] = useState<RecordingListItem[]>([]);
+  const [recordingsLoading, setRecordingsLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -214,7 +223,8 @@ function App() {
     if (!selectedPatient) return;
     setBusy(true);
     setRecordingAction("complete");
-    setNotice(null);
+    setSummaryEmailSent(false);
+    setNotice(`Uploading ${COMPLETE_SYNTHETIC_RECORDING_FILENAME}`);
     try {
       const draft =
         encounter?.patient?.id === selectedPatient.id
@@ -243,6 +253,53 @@ function App() {
     }
   }
 
+  async function showRecordings() {
+    setPage("recordings");
+    setRecordingsLoading(true);
+    setNotice(null);
+    try {
+      setRecordings(await getRecordings());
+    } catch (error) {
+      setNotice(
+        error instanceof Error ? error.message : "Recordings unavailable."
+      );
+    } finally {
+      setRecordingsLoading(false);
+    }
+  }
+
+  async function openRecording(encounterId: string) {
+    setBusy(true);
+    try {
+      const selected = await getEncounter(encounterId);
+      setEncounter(selected);
+      setSelectedPatient(selected.patient ?? null);
+      setSelectedField(selected.proposals[0]?.id ?? null);
+      setProcedure(selected.procedure);
+      setPage("review");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Encounter unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function processRecording(encounterId: string) {
+    setRecordingsLoading(true);
+    try {
+      const result = await processCompleteExampleRecording(encounterId);
+      setEncounter(result.encounter);
+      setSelectedPatient(result.encounter.patient ?? null);
+      setSelectedField(result.encounter.proposals[0]?.id ?? null);
+      setProcedure(result.encounter.procedure);
+      setPage("review");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Recording failed.");
+    } finally {
+      setRecordingsLoading(false);
+    }
+  }
+
   async function raiseSecondOpinion() {
     if (!encounter) return;
     setBusy(true);
@@ -261,6 +318,13 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function mockEmailCustomerSummary() {
+    if (!encounter?.customerSummary) return;
+    const recipient = encounter.patient?.displayName ?? encounter.patientReference;
+    setSummaryEmailSent(true);
+    setNotice(`Mock email queued for ${recipient}.`);
   }
 
   if (!encounter) {
@@ -282,6 +346,14 @@ function App() {
             <small>Pre-anesthetic record</small>
           </span>
         </a>
+        <nav className="topbar-nav" aria-label="Workspace navigation">
+          <button type="button" onClick={() => setPage("review")}>
+            Review workspace
+          </button>
+          <button type="button" onClick={showRecordings}>
+            Recordings
+          </button>
+        </nav>
         <div className="encounter-state">
           <span className="live-dot" />
           Review in progress
@@ -294,6 +366,14 @@ function App() {
         </button>
       </header>
 
+      {page === "recordings" ? (
+        <RecordingsPage
+          recordings={recordings}
+          loading={recordingsLoading}
+          onOpen={openRecording}
+          onProcess={processRecording}
+        />
+      ) : (
       <main>
         <section className="patient-workflow" aria-label="Patient PAC workflow">
           <div className="patient-search">
@@ -573,6 +653,27 @@ function App() {
               </div>
             )}
 
+            {encounter.customerSummary && (
+              <section
+                className="customer-summary-drawer"
+                aria-label="Customer summary drawer"
+              >
+                <div>
+                  <span className="section-label">Customer summary</span>
+                  <h3>Simple note for patient</h3>
+                  <p>{encounter.customerSummary}</p>
+                </div>
+                <button
+                  className="handoff-button"
+                  type="button"
+                  onClick={mockEmailCustomerSummary}
+                  disabled={summaryEmailSent}
+                >
+                  {summaryEmailSent ? "Mock email sent" : "Mock email summary"}
+                </button>
+              </section>
+            )}
+
             <footer className="sheet-footer">
               <div className="safety-note">
                 <ShieldCheck size={18} />
@@ -647,6 +748,7 @@ function App() {
           </section>
         </section>
       </main>
+      )}
     </div>
   );
 }

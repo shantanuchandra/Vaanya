@@ -4,7 +4,12 @@ import {
   type Encounter,
   type PatientSummary
 } from "@vaanaya/contracts";
-import type { EncounterStore } from "./encounter-store";
+import {
+  recordingListItem,
+  sortRecordingList,
+  type EncounterStore
+} from "./encounter-store";
+import { createDemoEncounters } from "./demo-cohort";
 
 type EncounterRow = {
   id: number;
@@ -17,6 +22,34 @@ type EncounterRow = {
 
 export function normalizeDatabaseTimestamp(value: string): string {
   return new Date(value).toISOString();
+}
+
+export function transcriptRowsToInsert(
+  encounterId: number,
+  transcript: Encounter["transcript"],
+  persistedSequences: ReadonlySet<number>
+) {
+  return transcript.flatMap((turn, index) => {
+    const sequenceNumber = index + 1;
+    if (
+      persistedSequences.has(sequenceNumber) ||
+      !["clinician", "patient", "caregiver"].includes(turn.speaker)
+    ) {
+      return [];
+    }
+    return [
+      {
+        encounter_id: encounterId,
+        sequence_number: sequenceNumber,
+        speaker_role: turn.speaker as "clinician" | "patient" | "caregiver",
+        source_language: turn.language,
+        original_text: turn.original,
+        translated_text: turn.translation,
+        confidence: turn.confidence,
+        offset_seconds: turn.offsetSeconds
+      }
+    ];
+  });
 }
 
 export class SupabaseEncounterStore implements EncounterStore {
@@ -53,6 +86,9 @@ export class SupabaseEncounterStore implements EncounterStore {
   }
 
   async get(id: string): Promise<Encounter | null> {
+    if (id.startsWith("synthetic-")) {
+      return createDemoEncounters().find(encounter => encounter.id === id) ?? null;
+    }
     const encounter = await this.encounterRow(id);
     if (!encounter) return null;
 
@@ -109,6 +145,19 @@ export class SupabaseEncounterStore implements EncounterStore {
     const turnIdByDatabaseId = new Map(
       turns.map(turn => [turn.databaseId, turn.id])
     );
+    const customerSummary = (auditResult.data ?? [])
+      .map(event => event.detail)
+      .filter(
+        (detail): detail is { customerSummary: string } =>
+          Boolean(
+            detail &&
+              typeof detail === "object" &&
+              "customerSummary" in detail &&
+              typeof (detail as { customerSummary?: unknown }).customerSummary ===
+                "string"
+          )
+      )
+      .at(-1)?.customerSummary;
 
     return EncounterSchema.parse({
       id: id === "demo" ? "demo" : String(encounter.id),
@@ -117,6 +166,7 @@ export class SupabaseEncounterStore implements EncounterStore {
       preferredLanguage: encounter.preferred_language,
       state: encounter.state,
       consentRecorded: Boolean(consentResult.data?.length),
+      customerSummary,
       requiredFieldIds: (proposalsResult.data ?? [])
         .filter(proposal => proposal.required)
         .map(proposal => proposal.field_key),
@@ -147,13 +197,38 @@ export class SupabaseEncounterStore implements EncounterStore {
     if (!row.assigned_clinician_id)
       throw new Error("A clinician must be assigned before persistence.");
 
-    const { data: persistedProposals, error: proposalReadError } =
-      await this.client
+    const [proposalResult, transcriptResult] = await Promise.all([
+      this.client
         .from("pac_field_proposals")
         .select("id,field_key,field_state,proposed_value")
-        .eq("encounter_id", row.id);
+        .eq("encounter_id", row.id),
+      this.client
+        .from("transcript_segments")
+        .select("sequence_number")
+        .eq("encounter_id", row.id)
+    ]);
+    const { data: persistedProposals, error: proposalReadError } = proposalResult;
     if (proposalReadError)
       throw new Error(`Supabase proposal read failed: ${proposalReadError.message}`);
+    if (transcriptResult.error)
+      throw new Error(
+        `Supabase transcript read failed: ${transcriptResult.error.message}`
+      );
+
+    const transcriptRows = transcriptRowsToInsert(
+      row.id,
+      encounter.transcript,
+      new Set(
+        (transcriptResult.data ?? []).map(segment => segment.sequence_number)
+      )
+    );
+    if (transcriptRows.length) {
+      const { error } = await this.client
+        .from("transcript_segments")
+        .insert(transcriptRows);
+      if (error)
+        throw new Error(`Supabase transcript write failed: ${error.message}`);
+    }
 
     for (const proposal of encounter.proposals) {
       const persisted = persistedProposals.find(
@@ -246,5 +321,11 @@ export class SupabaseEncounterStore implements EncounterStore {
 
   async createEncounter(): Promise<Encounter> {
     throw new Error("Supabase encounter creation requires the longitudinal PAC migration.");
+  }
+
+  async listRecordings(_input: { organizationId: string }) {
+    return sortRecordingList(
+      createDemoEncounters().map(recordingListItem)
+    );
   }
 }

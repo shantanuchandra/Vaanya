@@ -14,13 +14,14 @@ import {
   type RecommendationQuestion,
   type TranscriptTurn
 } from "@vaanaya/contracts";
-import { createDemoEncounter } from "./demo-encounter";
+import { createDemoEncounters } from "./demo-cohort";
 import {
   MemoryEncounterStore,
   type EncounterStore
 } from "./encounter-store";
 import {
   OpenAiPacClient,
+  type PacConversationStructure,
   type PacConversationTurn
 } from "./openai-client";
 import {
@@ -82,7 +83,7 @@ type BuildServerOptions = {
   openAiPacClient?: {
     structurePacConversation(
       segments: DiarizedSegment[]
-    ): Promise<PacConversationTurn[]>;
+    ): Promise<PacConversationStructure>;
   };
   reviewStore?: ReviewStore;
   timingStore?: TimingStore;
@@ -304,6 +305,7 @@ function encounterFromDiarizedRecording(input: {
   sarvamRequestId: string | null;
   segments: DiarizedSegment[];
   turns: PacConversationTurn[];
+  customerSummary?: string;
 }): Encounter {
   const bySegmentId = new Map(input.turns.map(turn => [turn.segmentId, turn]));
   const transcript: TranscriptTurn[] = input.segments.map(segment => {
@@ -339,6 +341,7 @@ function encounterFromDiarizedRecording(input: {
     ...input.encounter,
     state: "clinician_review",
     sourceType: "uploaded_mp4",
+    customerSummary: input.customerSummary,
     transcript: [...input.encounter.transcript, ...transcript],
     proposals: [
       ...input.encounter.proposals.filter(
@@ -372,6 +375,8 @@ function encounterFromDiarizedRecording(input: {
           filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
           sarvamRequestId: input.sarvamRequestId,
           segmentCount: input.segments.length,
+          customerSummaryGenerated: Boolean(input.customerSummary),
+          customerSummary: input.customerSummary,
           topicCounts: topicCounts(input.turns),
           clinicianReviewRequired: true,
           model: "gpt-5.6-sol"
@@ -390,7 +395,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
   const store =
     options.store ??
     configuredSupabaseStore ??
-    new MemoryEncounterStore([createDemoEncounter()]);
+    new MemoryEncounterStore(createDemoEncounters());
 
   await server.register(cors, {
     origin: process.env.WEB_ORIGIN ?? false,
@@ -495,6 +500,20 @@ export async function buildServer(options: BuildServerOptions = {}) {
       organizationId: request.actor!.organizationId,
       query: request.query.q ?? ""
     });
+  });
+
+  server.get("/api/recordings", async (request, reply) => {
+    try {
+      return await store.listRecordings({
+        organizationId: request.actor!.organizationId
+      });
+    } catch (error) {
+      request.log.error({ error }, "Recordings worklist unavailable");
+      return reply.code(503).send({
+        code: "RECORDINGS_WORKLIST_UNAVAILABLE",
+        message: "The recordings worklist is unavailable in this storage mode."
+      });
+    }
   });
 
   server.post<{
@@ -861,6 +880,15 @@ export async function buildServer(options: BuildServerOptions = {}) {
           "Complete synthetic recording upload requires consent and clinician review state."
       });
     }
+    const completeRecordingFilename = basename(COMPLETE_EXAMPLE_RECORDING_PATH);
+    const alreadyProcessed = encounter.audit.some(
+      event =>
+        event.action === "recording.synthetic_processed" &&
+        event.detail?.filename === completeRecordingFilename
+    );
+    if (alreadyProcessed && encounter.transcript.length > 0) {
+      return { status: "cached" as const, encounter };
+    }
     if (!sarvamClient?.processDiarizedTranslation) {
       return reply.code(503).send({
         code: "SARVAM_BATCH_NOT_CONFIGURED",
@@ -880,7 +908,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
         mimeType: "audio/mp4",
         languageCode: "hi-IN"
       });
-      const turns = await openAiPacClient.structurePacConversation(
+      const structure = await openAiPacClient.structurePacConversation(
         sarvamResult.segments
       );
       const saved = await store.save(
@@ -889,7 +917,8 @@ export async function buildServer(options: BuildServerOptions = {}) {
           actorId: request.actor!.id,
           sarvamRequestId: sarvamResult.requestId,
           segments: sarvamResult.segments,
-          turns
+          turns: structure.turns,
+          customerSummary: structure.customerSummary
         })
       );
       return { status: "completed" as const, encounter: saved };

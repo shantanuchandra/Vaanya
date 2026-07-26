@@ -1,4 +1,9 @@
-import type { Encounter, PatientSummary } from "@vaanaya/contracts";
+import type {
+  Encounter,
+  PatientSummary,
+  RecordingListItem,
+  RecordingStatus
+} from "@vaanaya/contracts";
 
 type CreatePatientInput = {
   organizationId: string;
@@ -25,6 +30,66 @@ export interface EncounterStore {
   }): Promise<PatientSummary[]>;
   createPatient(input: CreatePatientInput): Promise<PatientSummary>;
   createEncounter(input: CreateEncounterInput): Promise<Encounter>;
+  listRecordings(input: {
+    organizationId: string;
+  }): Promise<RecordingListItem[]>;
+}
+
+function recordingStatus(encounter: Encounter): RecordingStatus {
+  if (
+    encounter.audit.some(
+      event => event.action === "recording.processing_failed"
+    )
+  )
+    return "failed";
+  if (
+    ["signed", "summary_approved", "shared"].includes(encounter.state)
+  )
+    return "signed";
+  if (encounter.state === "processing") return "processing";
+  if (encounter.state === "clinician_review") return "ready_for_review";
+  return "uploaded";
+}
+
+export function recordingListItem(encounter: Encounter): RecordingListItem {
+  if (!encounter.patient)
+    throw new Error("A recording list item requires a patient.");
+  const applicable = encounter.proposals.filter(item => item.required);
+  const recordedAt =
+    encounter.audit
+      .map(event => event.detail.recordedAt)
+      .find((value): value is string => typeof value === "string") ??
+    encounter.audit[0]?.occurredAt ??
+    "2026-07-26T00:00:00.000Z";
+  return {
+    encounterId: encounter.id,
+    patient: encounter.patient,
+    synthetic: true,
+    procedure: encounter.procedure,
+    preferredLanguage: encounter.preferredLanguage,
+    recordedAt,
+    status: recordingStatus(encounter),
+    answeredCount: applicable.filter(item =>
+      ["captured", "clinician_entered", "intentionally_skipped"].includes(
+        item.state
+      )
+    ).length,
+    applicableCount: Math.max(1, applicable.length),
+    criticalGapCount: applicable.filter(item =>
+      ["uncertain", "missing"].includes(item.state)
+    ).length,
+    hasTranscript: encounter.transcript.length > 0
+  };
+}
+
+export function sortRecordingList(
+  items: RecordingListItem[]
+): RecordingListItem[] {
+  return [...items].sort((left, right) => {
+    const priority =
+      Number(left.status !== "uploaded") - Number(right.status !== "uploaded");
+    return priority || Date.parse(right.recordedAt) - Date.parse(left.recordedAt);
+  });
 }
 
 export class MemoryEncounterStore implements EncounterStore {
@@ -154,6 +219,15 @@ export class MemoryEncounterStore implements EncounterStore {
     };
     this.#encounters.set(encounter.id, encounter);
     return encounter;
+  }
+
+  async listRecordings(input: {
+    organizationId: string;
+  }): Promise<RecordingListItem[]> {
+    void input.organizationId;
+    return sortRecordingList(
+      [...this.#encounters.values()].map(recordingListItem)
+    );
   }
 }
 

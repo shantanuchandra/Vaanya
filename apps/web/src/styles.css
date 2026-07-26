@@ -28,6 +28,20 @@ button:focus-visible, textarea:focus-visible, a:focus-visible {
   outline-offset: 3px;
 }
 
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topbar-nav button {
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--white);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
 .auth-page, .auth-loading {
   min-height: 100vh;
   display: grid;
@@ -625,6 +639,28 @@ main { max-width: 1500px; margin: 0 auto; padding: 0 34px 54px; }
   font-size: 12px;
   text-transform: none;
 }
+.customer-summary-drawer {
+  margin: 20px 24px 24px;
+  padding: 18px;
+  border: 1px solid #bdcec4;
+  background: var(--green-soft);
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+}
+.customer-summary-drawer h3 {
+  font-family: var(--display);
+  font-size: 22px;
+  margin: 4px 0;
+}
+.customer-summary-drawer p {
+  margin: 0;
+  max-width: 560px;
+  color: #40554c;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .confirm-button, .sign-button {
   border: 0;
   display: inline-flex;
@@ -945,6 +981,7 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   .case-facts div { padding-bottom: 10px; }
   .workspace { border-left: 0; border-right: 0; margin: 0 -18px; }
   .resolution-drawer { grid-template-columns: 1fr; }
+  .customer-summary-drawer { align-items: stretch; flex-direction: column; }
   .patient-handoff { align-items: stretch; flex-direction: column; }
   .capture-prompt, .capture-result p { margin-right: 0; padding-bottom: 40px; }
   .field-main { padding-right: 76px; }
@@ -962,6 +999,7 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   .topbar,
   .evidence-panel,
   .resolution-drawer,
+  .customer-summary-drawer,
   .sheet-footer,
   .notice,
   .patient-handoff {
@@ -984,4 +1022,109 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   .pac-field { break-inside: avoid; }
   .field-main { padding: 5mm 25mm 5mm 3mm; }
   .source-link { pointer-events: none; }
+}
+
+.recordings-page {
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 42px 0 72px;
+}
+
+.recordings-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.recordings-toolbar h1 {
+  margin: 6px 0;
+}
+
+.recordings-toolbar p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.synthetic-data-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--paper);
+  white-space: nowrap;
+}
+
+.recording-list {
+  display: grid;
+  gap: 10px;
+}
+
+.recording-list-item {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.2fr) minmax(210px, 1fr) minmax(160px, .8fr) auto auto;
+  align-items: center;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--rule);
+  border-radius: 16px;
+  background: var(--paper);
+}
+
+.recording-patient,
+.recording-patient > div,
+.recording-details,
+.recording-metrics {
+  display: flex;
+}
+
+.recording-patient {
+  align-items: center;
+  gap: 11px;
+}
+
+.recording-patient > div,
+.recording-details,
+.recording-metrics {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.recording-list-item small,
+.recording-metrics {
+  color: var(--muted);
+}
+
+.recording-status {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--green-soft);
+  font-size: .78rem;
+  white-space: nowrap;
+}
+
+.recording-status-uploaded { background: #fff0cb; color: #714c00; }
+.recording-status-ready_for_review { background: #dff4ec; color: #155c49; }
+.recording-status-failed { background: #fee4e2; color: #8f241f; }
+.recording-status-signed { background: #e5e8f7; color: #34417b; }
+
+@media (max-width: 760px) {
+  .recordings-page {
+    width: min(100% - 24px, 620px);
+    padding-top: 24px;
+  }
+
+  .recordings-toolbar,
+  .recording-list-item {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .synthetic-data-badge {
+    align-self: flex-start;
+  }
 }

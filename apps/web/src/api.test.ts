@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  getRecordings,
   setAccessTokenProvider,
   transcribeEncounterSpeech,
   transcribeAudio
@@ -29,6 +30,35 @@ describe("speech API", () => {
     expect(new Headers(init.headers).get("authorization")).toBe(
       "Bearer clinician-jwt"
     );
+  });
+
+  it("loads and validates the recordings worklist", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          encounterId: "demo",
+          patient: {
+            id: "patient-demo",
+            displayName: "Shantanu Chandra",
+            mobileNumber: "+919811110001",
+            mobileLast4: "0001"
+          },
+          synthetic: true,
+          procedure: "Laparoscopic hernia repair",
+          preferredLanguage: "hi-IN",
+          recordedAt: "2026-07-26T08:30:00.000Z",
+          status: "uploaded",
+          answeredCount: 2,
+          applicableCount: 4,
+          criticalGapCount: 1,
+          hasTranscript: false
+        }
+      ]
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(getRecordings()).resolves.toHaveLength(1);
   });
 
   it("uploads microphone audio without putting credentials in the browser", async () => {
