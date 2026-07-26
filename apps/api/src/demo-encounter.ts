@@ -4,13 +4,13 @@ export function createDemoEncounter(): Encounter {
   return EncounterSchema.parse({
     id: "demo",
     patient: {
-      id: "patient-demo-ravi",
-      displayName: "Ravi Kumar",
-      mobileNumber: "+919900001111",
-      mobileLast4: "1111"
+      id: "patient-demo-shantanu",
+      displayName: "Shantanu Chandra",
+      mobileNumber: "+919811110001",
+      mobileLast4: "0001"
     },
-    patientReference: "SYN-PAC-042",
-    procedure: "Elective abdominal procedure",
+    patientReference: "Shantanu Chandra",
+    procedure: "Laparoscopic hernia repair",
     preferredLanguage: "hi-IN",
     state: "clinician_review",
     consentRecorded: true,
@@ -109,6 +109,18 @@ export function createDemoEncounter(): Encounter {
         offsetSeconds: 76
       }
     ],
-    audit: []
+    audit: [
+      {
+        id: "seed-demo-shantanu",
+        action: "synthetic_demo_seeded",
+        actorId: "system",
+        occurredAt: "2026-07-26T08:30:00.000Z",
+        detail: {
+          syntheticDemo: true,
+          recordedAt: "2026-07-26T08:30:00.000Z",
+          pacFocus: "Hypertension medication verification"
+        }
+      }
+    ]
   });
 }
