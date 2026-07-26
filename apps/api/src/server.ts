@@ -8,12 +8,24 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  deferChecklistItem,
+  enterChecklistItem,
+  normalizeProcedureFamily,
   resolveProposal,
   signEncounter,
+  SYNTHETIC_PAC_TEMPLATE,
+  withEvaluatedChecklist,
   type Encounter,
   type RecommendationQuestion,
   type TranscriptTurn
 } from "@vaanaya/contracts";
+import { materializeChecklistProposals } from "./checklist-proposals";
+import {
+  buildPublishedChecklistVersion,
+  decideChecklistSuggestion,
+  normalizeProcedureLibraryKey,
+  sanitizeUnknownProcedureSuggestions
+} from "./unknown-procedure-checklist";
 import { createDemoEncounters } from "./demo-cohort";
 import {
   MemoryEncounterStore,
@@ -28,6 +40,7 @@ import {
   SarvamClient,
   type DiarizedSegment,
   type SarvamLanguageCode,
+  type SarvamTextLanguageCode,
   type PacSuggestion,
   type TranscriptionInput,
   type TranscriptionResult
@@ -78,12 +91,33 @@ type BuildServerOptions = {
     synthesizeKannada(
       text: string
     ): Promise<{ requestId: string | null; audioBase64: string }>;
+    translateText?(input: {
+      text: string;
+      targetLanguageCode: SarvamTextLanguageCode;
+    }): Promise<{ requestId: string | null; translatedText: string }>;
+    synthesizeSpeech?(input: {
+      text: string;
+      languageCode: SarvamTextLanguageCode;
+    }): Promise<{ requestId: string | null; audioBase64: string }>;
   };
   authenticator?: Authenticator;
   openAiPacClient?: {
     structurePacConversation(
-      segments: DiarizedSegment[]
+      segments: DiarizedSegment[],
+      checklistItems?: Array<{ itemId: string; label: string }>
     ): Promise<PacConversationStructure>;
+    suggestChecklistForUnknownProcedure?(input: {
+      procedure: string;
+      existingItems: Array<{ itemId: string; label: string }>;
+      categoryIds: string[];
+    }): Promise<{
+      modelRunId: string;
+      suggestions: Array<{
+        categoryId: string;
+        question: string;
+        rationale: string;
+      }>;
+    }>;
   };
   reviewStore?: ReviewStore;
   timingStore?: TimingStore;
@@ -97,6 +131,13 @@ const EXAMPLE_RECORDING_PATH = fileURLToPath(
 const COMPLETE_EXAMPLE_RECORDING_PATH = fileURLToPath(
   new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.mp4", import.meta.url)
 );
+const PATIENT_SUMMARY_LANGUAGES = new Set<SarvamTextLanguageCode>([
+  "en-IN",
+  "hi-IN",
+  "kn-IN",
+  "ta-IN",
+  "te-IN"
+]);
 
 type SpeechExtractionClient = NonNullable<BuildServerOptions["sarvamClient"]>;
 
@@ -305,6 +346,7 @@ function encounterFromDiarizedRecording(input: {
   sarvamRequestId: string | null;
   segments: DiarizedSegment[];
   turns: PacConversationTurn[];
+  checklistProposals: PacConversationStructure["checklistProposals"];
   customerSummary?: string;
 }): Encounter {
   const bySegmentId = new Map(input.turns.map(turn => [turn.segmentId, turn]));
@@ -326,40 +368,37 @@ function encounterFromDiarizedRecording(input: {
       offsetSeconds: segment.startSeconds
     };
   });
-  const medicationSegments = input.turns
-    .filter(turn => turn.topic === "medications")
-    .map(turn => turn.segmentId);
-  const uncertainMedication = input.segments.some(
-    segment =>
-      medicationSegments.includes(segment.id) &&
-      /blood thinner|forgot|do not remember|unknown|name/i.test(
-        segment.translatedText
-      )
+  const evaluated = withEvaluatedChecklist(input.encounter).checklist!;
+  const generatedProposals = materializeChecklistProposals({
+    applicableItems: evaluated.items
+      .filter(item => item.applicable)
+      .map(item => ({
+        id: item.id,
+        label: item.label,
+        required: item.required,
+        authority: item.authority
+      })),
+    modelItems: input.checklistProposals.map(item => ({
+      itemId: item.itemId,
+      state: item.state,
+      value: item.value,
+      sourceTurnIds: item.sourceSegmentIds
+    })),
+    transcript
+  });
+  const preservedProposals = input.encounter.proposals.filter(
+    proposal =>
+      ["clinician_entered", "intentionally_skipped"].includes(proposal.state) &&
+      !generatedProposals.some(generated => generated.id === proposal.id)
   );
 
-  return {
+  return withEvaluatedChecklist({
     ...input.encounter,
     state: "clinician_review",
     sourceType: "uploaded_mp4",
     customerSummary: input.customerSummary,
     transcript: [...input.encounter.transcript, ...transcript],
-    proposals: [
-      ...input.encounter.proposals.filter(
-        proposal => proposal.id !== "medications"
-      ),
-      {
-        id: "medications",
-        label: "Current medicines",
-        state: uncertainMedication ? "uncertain" : "captured",
-        value: uncertainMedication
-          ? "Patient reports a blood thinner, but the exact medicine name is not recalled."
-          : "Medication discussion captured from the synthetic recording; clinician review required.",
-        sourceTurnIds: medicationSegments.length
-          ? medicationSegments
-          : input.segments.map(segment => segment.id),
-        required: true
-      }
-    ],
+    proposals: [...preservedProposals, ...generatedProposals],
     recommendationQuestions: buildRecommendationQuestions(
       input.segments.map(segment => segment.translatedText).join(" ")
     ),
@@ -383,7 +422,7 @@ function encounterFromDiarizedRecording(input: {
         }
       }
     ]
-  };
+  });
 }
 
 export async function buildServer(options: BuildServerOptions = {}) {
@@ -553,7 +592,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
     try {
-      const encounter = await store.createEncounter({
+      let encounter = await store.createEncounter({
         organizationId: request.actor!.organizationId,
         actorId: request.actor!.id,
         patientId,
@@ -561,6 +600,64 @@ export async function buildServer(options: BuildServerOptions = {}) {
         preferredLanguage,
         sourceType
       });
+      if (normalizeProcedureFamily(procedure) === "generic") {
+        const normalizedProcedure = normalizeProcedureLibraryKey(procedure);
+        const published = await store.findChecklistLibraryVersion({
+          organizationId: request.actor!.organizationId,
+          normalizedProcedure
+        });
+        if (published) {
+          encounter = withEvaluatedChecklist({
+            ...encounter,
+            checklistExtensions: published.items,
+            checklistLibrary: {
+              normalizedProcedure,
+              version: published.version,
+              source: published.source
+            }
+          });
+        } else if (openAiPacClient?.suggestChecklistForUnknownProcedure) {
+          try {
+            const generated =
+              await openAiPacClient.suggestChecklistForUnknownProcedure({
+                procedure,
+                existingItems: SYNTHETIC_PAC_TEMPLATE.items.map(item => ({
+                  itemId: item.id,
+                  label: item.label
+                })),
+                categoryIds: SYNTHETIC_PAC_TEMPLATE.categories.map(
+                  category => category.id
+                )
+              });
+            encounter = withEvaluatedChecklist({
+              ...encounter,
+              checklistSuggestions: sanitizeUnknownProcedureSuggestions({
+                procedure,
+                modelRunId: generated.modelRunId,
+                categoryIds: SYNTHETIC_PAC_TEMPLATE.categories.map(
+                  category => category.id
+                ),
+                suggestions: generated.suggestions
+              })
+            });
+          } catch {
+            encounter = {
+              ...encounter,
+              audit: [
+                ...encounter.audit,
+                {
+                  id: crypto.randomUUID(),
+                  action: "checklist.suggestion_generation_failed",
+                  actorId: "system",
+                  occurredAt: new Date().toISOString(),
+                  detail: { genericCoverageRetained: true }
+                }
+              ]
+            };
+          }
+        }
+        encounter = await store.save(encounter);
+      }
       return reply.code(201).send(encounter);
     } catch (error) {
       return reply.code(404).send({
@@ -908,8 +1005,15 @@ export async function buildServer(options: BuildServerOptions = {}) {
         mimeType: "audio/mp4",
         languageCode: "hi-IN"
       });
+      const activeChecklist = withEvaluatedChecklist(encounter).checklist!;
       const structure = await openAiPacClient.structurePacConversation(
-        sarvamResult.segments
+        sarvamResult.segments,
+        activeChecklist.items
+          .filter(
+            item =>
+              item.applicable && item.authority === "evidence_or_clinician"
+          )
+          .map(item => ({ itemId: item.id, label: item.label }))
       );
       const saved = await store.save(
         encounterFromDiarizedRecording({
@@ -918,6 +1022,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
           sarvamRequestId: sarvamResult.requestId,
           segments: sarvamResult.segments,
           turns: structure.turns,
+          checklistProposals: structure.checklistProposals,
           customerSummary: structure.customerSummary
         })
       );
@@ -928,6 +1033,60 @@ export async function buildServer(options: BuildServerOptions = {}) {
         code: "COMPLETE_SYNTHETIC_RECORDING_FAILED",
         message:
           "The complete synthetic recording could not be diarized, translated, or structured."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+    Body: { languageCode?: SarvamTextLanguageCode };
+  }>("/api/encounters/:id/patient-summary-handoff", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    const languageCode = request.body?.languageCode ?? encounter.preferredLanguage;
+    if (!PATIENT_SUMMARY_LANGUAGES.has(languageCode as SarvamTextLanguageCode)) {
+      return reply.code(400).send({
+        code: "UNSUPPORTED_LANGUAGE",
+        message: "Choose one of the Sarvam demo languages."
+      });
+    }
+    const sourceText = encounter.customerSummary?.trim();
+    if (!sourceText) {
+      return reply.code(409).send({
+        code: "SUMMARY_NOT_READY",
+        message: "Process the PAC recording before generating patient audio."
+      });
+    }
+    if (!sarvamClient?.translateText || !sarvamClient?.synthesizeSpeech) {
+      return reply.code(503).send({
+        code: "SARVAM_NOT_CONFIGURED",
+        message: "Patient-language summary audio is not configured."
+      });
+    }
+    try {
+      const targetLanguageCode = languageCode as SarvamTextLanguageCode;
+      const translation = await sarvamClient.translateText({
+        text: sourceText,
+        targetLanguageCode
+      });
+      const speech = await sarvamClient.synthesizeSpeech({
+        text: translation.translatedText,
+        languageCode: targetLanguageCode
+      });
+      return {
+        sourceText,
+        translatedText: translation.translatedText,
+        languageCode: targetLanguageCode,
+        audioBase64: speech.audioBase64,
+        audioMimeType: "audio/mpeg"
+      };
+    } catch (error) {
+      request.log.error({ error }, "Patient summary handoff failed");
+      return reply.code(502).send({
+        code: "PATIENT_SUMMARY_HANDOFF_FAILED",
+        message: "The patient-language summary could not be generated."
       });
     }
   });
@@ -1070,6 +1229,208 @@ export async function buildServer(options: BuildServerOptions = {}) {
         return reply.code(409).send({
           code: "WORKFLOW_CONFLICT",
           message: error instanceof Error ? error.message : "Workflow conflict."
+        });
+      }
+    }
+  );
+
+  server.patch<{
+    Params: { id: string; itemId: string };
+    Body: { value?: string };
+  }>("/api/encounters/:id/checklist/:itemId", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter)
+      return reply.code(404).send({
+        code: "NOT_FOUND",
+        message: "Encounter not found."
+      });
+    if (request.actor?.role !== "clinician")
+      return reply.code(403).send({
+        code: "CLINICIAN_REQUIRED",
+        message: "Only a clinician can enter checklist content."
+      });
+    if (!request.body?.value?.trim())
+      return reply.code(400).send({
+        code: "INVALID_COMMAND",
+        message: "value is required."
+      });
+    try {
+      return await store.save(
+        enterChecklistItem(encounter, {
+          itemId: request.params.itemId,
+          value: request.body.value,
+          actorId: request.actor.id
+        })
+      );
+    } catch (error) {
+      return reply.code(409).send({
+        code: "WORKFLOW_CONFLICT",
+        message: error instanceof Error ? error.message : "Workflow conflict."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string; itemId: string };
+    Body: { reason?: string };
+  }>("/api/encounters/:id/checklist/:itemId/defer", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter)
+      return reply.code(404).send({
+        code: "NOT_FOUND",
+        message: "Encounter not found."
+      });
+    if (request.actor?.role !== "clinician")
+      return reply.code(403).send({
+        code: "CLINICIAN_REQUIRED",
+        message: "Only a clinician can defer checklist content."
+      });
+    if (!request.body?.reason?.trim())
+      return reply.code(400).send({
+        code: "INVALID_COMMAND",
+        message: "reason is required."
+      });
+    try {
+      return await store.save(
+        deferChecklistItem(encounter, {
+          itemId: request.params.itemId,
+          reason: request.body.reason,
+          actorId: request.actor.id
+        })
+      );
+    } catch (error) {
+      return reply.code(409).send({
+        code: "WORKFLOW_CONFLICT",
+        message: error instanceof Error ? error.message : "Workflow conflict."
+      });
+    }
+  });
+
+  for (const decision of ["approved", "rejected"] as const) {
+    server.post<{ Params: { id: string; suggestionId: string } }>(
+      `/api/encounters/:id/checklist-suggestions/:suggestionId/${
+        decision === "approved" ? "approve" : "reject"
+      }`,
+      async (request, reply) => {
+        const encounter = await store.get(request.params.id);
+        if (!encounter)
+          return reply.code(404).send({
+            code: "NOT_FOUND",
+            message: "Encounter not found."
+          });
+        if (request.actor?.role !== "clinician")
+          return reply.code(403).send({
+            code: "CLINICIAN_REQUIRED",
+            message: "Only a clinician can decide checklist suggestions."
+          });
+        try {
+          const checklistSuggestions = decideChecklistSuggestion({
+            suggestions: encounter.checklistSuggestions,
+            suggestionId: request.params.suggestionId,
+            decision,
+            actorId: request.actor.id
+          });
+          const approvedExtensions = checklistSuggestions
+            .filter(item => item.approvalState === "approved")
+            .map(item => ({
+              id: item.id,
+              categoryId: item.categoryId,
+              label: item.question,
+              question: item.question,
+              rationale: item.rationale,
+              required: false as const,
+              authority: "evidence_or_clinician" as const,
+              severity: "standard" as const,
+              deferrable: true as const,
+              applicability: { kind: "always" as const }
+            }));
+          return await store.save(
+            withEvaluatedChecklist({
+              ...encounter,
+              checklistSuggestions,
+              checklistExtensions: approvedExtensions,
+              audit: [
+                ...encounter.audit,
+                {
+                  id: crypto.randomUUID(),
+                  action: `checklist.suggestion_${decision}`,
+                  actorId: request.actor.id,
+                  occurredAt: new Date().toISOString(),
+                  detail: { suggestionId: request.params.suggestionId }
+                }
+              ]
+            })
+          );
+        } catch (error) {
+          return reply.code(409).send({
+            code: "WORKFLOW_CONFLICT",
+            message:
+              error instanceof Error ? error.message : "Workflow conflict."
+          });
+        }
+      }
+    );
+  }
+
+  server.post<{ Params: { id: string } }>(
+    "/api/encounters/:id/checklist-suggestions/publish",
+    async (request, reply) => {
+      const encounter = await store.get(request.params.id);
+      if (!encounter)
+        return reply.code(404).send({
+          code: "NOT_FOUND",
+          message: "Encounter not found."
+        });
+      if (request.actor?.role !== "clinician")
+        return reply.code(403).send({
+          code: "CLINICIAN_REQUIRED",
+          message: "Only a clinician can publish a checklist."
+        });
+      const normalizedProcedure = normalizeProcedureLibraryKey(
+        encounter.procedure
+      );
+      const latest = await store.findChecklistLibraryVersion({
+        organizationId: request.actor.organizationId,
+        normalizedProcedure
+      });
+      try {
+        const published = buildPublishedChecklistVersion({
+          organizationId: request.actor.organizationId,
+          procedure: encounter.procedure,
+          suggestions: encounter.checklistSuggestions,
+          latestVersion: latest?.version ?? 0,
+          actorId: request.actor.id
+        });
+        await store.publishChecklistLibraryVersion(published);
+        return await store.save(
+          withEvaluatedChecklist({
+            ...encounter,
+            checklistExtensions: published.items,
+            checklistLibrary: {
+              normalizedProcedure,
+              version: published.version,
+              source: published.source
+            },
+            audit: [
+              ...encounter.audit,
+              {
+                id: crypto.randomUUID(),
+                action: "checklist.library_published",
+                actorId: request.actor.id,
+                occurredAt: new Date().toISOString(),
+                detail: {
+                  normalizedProcedure,
+                  version: published.version
+                }
+              }
+            ]
+          })
+        );
+      } catch (error) {
+        return reply.code(409).send({
+          code: "WORKFLOW_CONFLICT",
+          message:
+            error instanceof Error ? error.message : "Workflow conflict."
         });
       }
     }

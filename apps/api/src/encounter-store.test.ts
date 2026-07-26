@@ -36,8 +36,8 @@ describe("recordings worklist", () => {
     expect(recordingListItem(encounter!)).toMatchObject({
       status: "uploaded",
       answeredCount: 0,
-      applicableCount: 1,
-      criticalGapCount: 1
+      applicableCount: encounter!.checklist?.applicableCount,
+      criticalGapCount: 12
     });
   });
 });

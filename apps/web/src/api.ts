@@ -287,6 +287,87 @@ export async function resolveField(
   return EncounterSchema.parse(payload);
 }
 
+async function parseEncounterResponse(
+  response: Response,
+  fallbackMessage: string
+): Promise<Encounter> {
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" &&
+      payload &&
+      "message" in payload &&
+      typeof payload.message === "string"
+        ? payload.message
+        : fallbackMessage;
+    throw new Error(message);
+  }
+  return EncounterSchema.parse(payload);
+}
+
+export async function enterChecklistItemRequest(
+  encounterId: string,
+  itemId: string,
+  value: string
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/checklist/${itemId}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value })
+    }
+  );
+  return parseEncounterResponse(response, "The checklist item could not be saved.");
+}
+
+export async function deferChecklistItemRequest(
+  encounterId: string,
+  itemId: string,
+  reason: string
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/checklist/${itemId}/defer`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason })
+    }
+  );
+  return parseEncounterResponse(
+    response,
+    "The checklist item could not be deferred."
+  );
+}
+
+export async function decideChecklistSuggestionRequest(
+  encounterId: string,
+  suggestionId: string,
+  decision: "approve" | "reject"
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/checklist-suggestions/${suggestionId}/${decision}`,
+    { method: "POST" }
+  );
+  return parseEncounterResponse(
+    response,
+    "The checklist suggestion could not be updated."
+  );
+}
+
+export async function publishChecklistSuggestionsRequest(
+  encounterId: string
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/checklist-suggestions/publish`,
+    { method: "POST" }
+  );
+  return parseEncounterResponse(
+    response,
+    "The procedure checklist could not be published."
+  );
+}
+
 export async function signEncounterRequest(
   encounterId: string
 ): Promise<Encounter> {
@@ -319,6 +400,57 @@ export type KannadaHandoff = {
   audioBase64: string;
   audioMimeType: "audio/mpeg";
 };
+
+export type PatientSummaryLanguageCode =
+  | "en-IN"
+  | "hi-IN"
+  | "kn-IN"
+  | "ta-IN"
+  | "te-IN";
+
+export type PatientSummaryHandoff = {
+  sourceText: string;
+  translatedText: string;
+  languageCode: PatientSummaryLanguageCode;
+  audioBase64: string;
+  audioMimeType: "audio/mpeg";
+};
+
+export async function createPatientSummaryHandoff(
+  encounterId: string,
+  languageCode: PatientSummaryLanguageCode
+): Promise<PatientSummaryHandoff> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/patient-summary-handoff`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ languageCode })
+    }
+  );
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    const message =
+      typeof payload === "object" &&
+      payload &&
+      "message" in payload &&
+      typeof payload.message === "string"
+        ? payload.message
+        : "Patient summary audio could not be generated.";
+    throw new Error(message);
+  }
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("translatedText" in payload) ||
+    typeof payload.translatedText !== "string" ||
+    !("audioBase64" in payload) ||
+    typeof payload.audioBase64 !== "string"
+  ) {
+    throw new Error("The patient summary handoff response was invalid.");
+  }
+  return payload as PatientSummaryHandoff;
+}
 
 export type GoldenCaseReview = {
   caseId: string;

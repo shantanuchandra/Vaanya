@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  checklistExtensionsFromPersistence,
+  checklistContextFromRow,
   normalizeDatabaseTimestamp,
   proposalRowsToInsert,
   sourceRowsToInsert,
@@ -8,6 +10,53 @@ import {
 } from "./supabase-encounter-store";
 
 describe("Supabase encounter mapping", () => {
+  it("rehydrates the exact published checklist-library items instead of reverting to generic coverage", () => {
+    const items = checklistExtensionsFromPersistence({
+      library: {
+        organization_id: "org-2",
+        normalized_procedure: "robotic_airway_case",
+        version: 2,
+        source: "clinician_reviewed_synthetic",
+        published_by: "clinician-1",
+        content: {
+          items: [
+            {
+              id: "library-airway-history",
+              categoryId: "history",
+              label: "Procedure-specific airway history",
+              question: "Was the reported airway history discussed?",
+              rationale: "Clinician-approved procedure documentation question.",
+              required: false,
+              authority: "evidence_or_clinician",
+              severity: "standard",
+              deferrable: true,
+              applicability: { kind: "always" }
+            }
+          ]
+        }
+      },
+      suggestions: []
+    });
+
+    expect(items).toEqual([
+      expect.objectContaining({ id: "library-airway-history" })
+    ]);
+  });
+
+  it("maps persisted checklist context into the versioned contract", () => {
+    expect(
+      checklistContextFromRow({
+        checklist_template_id: "synthetic-pac",
+        checklist_version: "synthetic-pac-v1",
+        checklist_context_flags: ["pregnancy_question_applicable"]
+      })
+    ).toEqual({
+      templateId: "synthetic-pac",
+      version: "synthetic-pac-v1",
+      contextFlags: ["pregnancy_question_applicable"]
+    });
+  });
+
   it("normalizes Postgres offset timestamps to contract ISO datetimes", () => {
     expect(normalizeDatabaseTimestamp("2026-07-26T06:15:00+00:00")).toBe(
       "2026-07-26T06:15:00.000Z"

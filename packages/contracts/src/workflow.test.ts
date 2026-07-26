@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   canTransition,
+  deferChecklistItem,
   EncounterSchema,
+  enterChecklistItem,
+  FieldProposalSchema,
   RecordingListSchema,
   resolveProposal,
-  signEncounter
+  signEncounter,
+  withEvaluatedChecklist
 } from "./index";
 
 const encounter = EncounterSchema.parse({
@@ -16,6 +20,24 @@ const encounter = EncounterSchema.parse({
   consentRecorded: true,
   requiredFieldIds: ["medications", "allergies"],
   proposals: [
+    ...[
+      ["identity", "Patient identity", "Identity confirmed"],
+      ["procedure", "Planned procedure", "Procedure confirmed"],
+      ["consent", "Recording consent", "Consent recorded"],
+      ["medical_history", "Relevant medical history", "History reviewed"],
+      ["previous_anesthesia", "Previous anesthesia", "History reviewed"],
+      ["fasting", "Reported fasting intake and time", "Statement reviewed"],
+      ["examination", "Clinician examination", "Examination entered"],
+      ["open_items", "Open items", "Open items reviewed"],
+      ["clinician_conclusion", "Clinician conclusion", "Conclusion entered"]
+    ].map(([id, label, value]) => ({
+      id,
+      label,
+      state: "clinician_entered" as const,
+      value,
+      sourceTurnIds: [],
+      required: true
+    })),
     {
       id: "medications",
       label: "Current medicines",
@@ -60,6 +82,104 @@ const encounter = EncounterSchema.parse({
 });
 
 describe("workflow transitions", () => {
+  it("allows clinician-entered content without manufactured transcript evidence", () => {
+    expect(() =>
+      FieldProposalSchema.parse({
+        id: "examination",
+        label: "Examination",
+        state: "clinician_entered",
+        value: "Clinician documented examination",
+        sourceTurnIds: [],
+        required: true
+      })
+    ).not.toThrow();
+  });
+
+  it("rejects captured content without source evidence", () => {
+    expect(() =>
+      FieldProposalSchema.parse({
+        id: "medications",
+        label: "Medicines",
+        state: "captured",
+        value: "Tablet",
+        sourceTurnIds: [],
+        required: true
+      })
+    ).toThrow();
+  });
+
+  it("creates a clinician-only entry and recomputes readiness", () => {
+    const withoutExamination = EncounterSchema.parse({
+      ...encounter,
+      proposals: encounter.proposals.filter(item => item.id !== "examination")
+    });
+    const updated = enterChecklistItem(withoutExamination, {
+      itemId: "examination",
+      value: "Clinician-entered examination",
+      actorId: "clinician-1"
+    });
+
+    expect(updated.proposals).toContainEqual(
+      expect.objectContaining({
+        id: "examination",
+        state: "clinician_entered",
+        sourceTurnIds: []
+      })
+    );
+    expect(updated.audit.at(-1)?.action).toBe("checklist.item_entered");
+  });
+
+  it("allows clinician entry for an approved procedure-library item", () => {
+    const extended = EncounterSchema.parse({
+      ...encounter,
+      checklistExtensions: [
+        {
+          id: "library-airway-history",
+          categoryId: "history",
+          label: "Procedure-specific airway history",
+          question: "Was the reported airway history discussed?",
+          rationale: "Clinician-approved procedure documentation question.",
+          required: false,
+          authority: "evidence_or_clinician",
+          severity: "standard",
+          deferrable: true,
+          applicability: { kind: "always" }
+        }
+      ]
+    });
+
+    const updated = enterChecklistItem(extended, {
+      itemId: "library-airway-history",
+      value: "Clinician reviewed and documented the reported history.",
+      actorId: "clinician-1"
+    });
+
+    expect(
+      updated.checklist?.items.find(item => item.id === "library-airway-history")
+    ).toMatchObject({
+      status: "answered",
+      value: "Clinician reviewed and documented the reported history."
+    });
+  });
+
+  it("rejects deferral of the clinician conclusion", () => {
+    expect(() =>
+      deferChecklistItem(encounter, {
+        itemId: "clinician_conclusion",
+        reason: "Not completed",
+        actorId: "clinician-1"
+      })
+    ).toThrow(/cannot be deferred/i);
+  });
+
+  it("attaches the versioned checklist evaluation", () => {
+    expect(withEvaluatedChecklist(encounter).checklist).toMatchObject({
+      templateId: "synthetic-pac",
+      version: "synthetic-pac-v1",
+      readyForSignoff: false
+    });
+  });
+
   it("validates an evidence-backed synthetic recording list item", () => {
     expect(
       RecordingListSchema.parse([
@@ -123,7 +243,11 @@ describe("workflow transitions", () => {
     expect(signed.state).toBe("signed");
     expect(signed.audit.at(-1)).toMatchObject({
       action: "encounter.signed",
-      actorId: "clinician-1"
+      actorId: "clinician-1",
+      detail: {
+        checklistTemplateId: "synthetic-pac",
+        checklistVersion: "synthetic-pac-v1"
+      }
     });
   });
 

@@ -1,8 +1,13 @@
 import type {
   Encounter,
+  ChecklistLibraryVersion,
   PatientSummary,
   RecordingListItem,
   RecordingStatus
+} from "@vaanaya/contracts";
+import {
+  EncounterSchema,
+  withEvaluatedChecklist
 } from "@vaanaya/contracts";
 
 type CreatePatientInput = {
@@ -33,6 +38,13 @@ export interface EncounterStore {
   listRecordings(input: {
     organizationId: string;
   }): Promise<RecordingListItem[]>;
+  findChecklistLibraryVersion(input: {
+    organizationId: string;
+    normalizedProcedure: string;
+  }): Promise<ChecklistLibraryVersion | null>;
+  publishChecklistLibraryVersion(
+    version: ChecklistLibraryVersion
+  ): Promise<ChecklistLibraryVersion>;
 }
 
 function recordingStatus(encounter: Encounter): RecordingStatus {
@@ -54,14 +66,15 @@ function recordingStatus(encounter: Encounter): RecordingStatus {
 export function recordingListItem(encounter: Encounter): RecordingListItem {
   if (!encounter.patient)
     throw new Error("A recording list item requires a patient.");
-  const applicable = encounter.proposals.filter(item => item.required);
+  const checklist =
+    encounter.checklist ?? withEvaluatedChecklist(encounter).checklist!;
   const recordedAt =
     encounter.audit
       .map(event => event.detail.recordedAt)
       .find((value): value is string => typeof value === "string") ??
     encounter.audit[0]?.occurredAt ??
     "2026-07-26T00:00:00.000Z";
-  const applicableCount = Math.max(1, applicable.length);
+  const applicableCount = checklist.applicableCount;
   const status = recordingStatus(encounter);
   return {
     encounterId: encounter.id,
@@ -71,19 +84,11 @@ export function recordingListItem(encounter: Encounter): RecordingListItem {
     preferredLanguage: encounter.preferredLanguage,
     recordedAt,
     status,
-    answeredCount: applicable.filter(item =>
-      ["captured", "clinician_entered", "intentionally_skipped"].includes(
-        item.state
-      )
-    ).length,
+    answeredCount: checklist.answeredCount,
     applicableCount,
-    criticalGapCount:
-      status === "uploaded"
-        ? applicableCount
-        : applicable.filter(item =>
-            ["uncertain", "missing"].includes(item.state)
-          ).length,
-    hasTranscript: encounter.transcript.length > 0
+    criticalGapCount: checklist.blockingGapCount,
+    hasTranscript: encounter.transcript.length > 0,
+    secondOpinionRequested: encounter.secondOpinionRequested
   };
 }
 
@@ -103,6 +108,7 @@ export class MemoryEncounterStore implements EncounterStore {
     string,
     PatientSummary & { organizationId: string; normalizedLookup: string }
   >();
+  readonly #checklistLibrary = new Map<string, ChecklistLibraryVersion[]>();
 
   constructor(initial: Encounter[]) {
     for (const encounter of initial) {
@@ -190,7 +196,7 @@ export class MemoryEncounterStore implements EncounterStore {
       throw new Error("Unknown patient.");
     }
 
-    const encounter: Encounter = {
+    const encounter = withEvaluatedChecklist(EncounterSchema.parse({
       id: `enc-${crypto.randomUUID()}`,
       patient: {
         id: patient.id,
@@ -221,7 +227,7 @@ export class MemoryEncounterStore implements EncounterStore {
           }
         }
       ]
-    };
+    }));
     this.#encounters.set(encounter.id, encounter);
     return encounter;
   }
@@ -233,6 +239,28 @@ export class MemoryEncounterStore implements EncounterStore {
     return sortRecordingList(
       [...this.#encounters.values()].map(recordingListItem)
     );
+  }
+
+  async findChecklistLibraryVersion(input: {
+    organizationId: string;
+    normalizedProcedure: string;
+  }): Promise<ChecklistLibraryVersion | null> {
+    return (
+      this.#checklistLibrary
+        .get(`${input.organizationId}:${input.normalizedProcedure}`)
+        ?.at(-1) ?? null
+    );
+  }
+
+  async publishChecklistLibraryVersion(
+    version: ChecklistLibraryVersion
+  ): Promise<ChecklistLibraryVersion> {
+    const key = `${version.organizationId}:${version.normalizedProcedure}`;
+    const versions = this.#checklistLibrary.get(key) ?? [];
+    if (versions.some(current => current.version === version.version))
+      throw new Error("Checklist library version already exists.");
+    this.#checklistLibrary.set(key, [...versions, version]);
+    return version;
   }
 }
 

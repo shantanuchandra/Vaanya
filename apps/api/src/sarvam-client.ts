@@ -1,4 +1,10 @@
 export type SarvamLanguageCode = "unknown" | "hi-IN" | "kn-IN" | "en-IN";
+export type SarvamTextLanguageCode =
+  | "en-IN"
+  | "hi-IN"
+  | "kn-IN"
+  | "ta-IN"
+  | "te-IN";
 
 export type TranscriptionInput = {
   bytes: Uint8Array;
@@ -426,9 +432,16 @@ export class SarvamClient {
     };
   }
 
-  async translateToKannada(
-    input: string
-  ): Promise<{ requestId: string | null; translatedText: string }> {
+  async translateText(input: {
+    text: string;
+    targetLanguageCode: SarvamTextLanguageCode;
+  }): Promise<{ requestId: string | null; translatedText: string }> {
+    if (input.targetLanguageCode === "en-IN") {
+      return {
+        requestId: null,
+        translatedText: input.text
+      };
+    }
     const response = await this.fetcher("https://api.sarvam.ai/translate", {
       method: "POST",
       headers: {
@@ -436,9 +449,9 @@ export class SarvamClient {
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        input,
+        input: input.text,
         source_language_code: "en-IN",
-        target_language_code: "kn-IN",
+        target_language_code: input.targetLanguageCode,
         model: "sarvam-translate:v1",
         mode: "formal"
       })
@@ -464,9 +477,19 @@ export class SarvamClient {
     };
   }
 
-  async synthesizeKannada(
-    text: string
-  ): Promise<{ requestId: string | null; audioBase64: string }> {
+  async translateToKannada(
+    input: string
+  ): Promise<{ requestId: string | null; translatedText: string }> {
+    return this.translateText({
+      text: input,
+      targetLanguageCode: "kn-IN"
+    });
+  }
+
+  async synthesizeSpeech(input: {
+    text: string;
+    languageCode: SarvamTextLanguageCode;
+  }): Promise<{ requestId: string | null; audioBase64: string }> {
     const response = await this.fetcher(
       "https://api.sarvam.ai/text-to-speech",
       {
@@ -476,8 +499,8 @@ export class SarvamClient {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          text,
-          target_language_code: "kn-IN",
+          text: input.text,
+          target_language_code: input.languageCode,
           model: "bulbul:v3",
           speaker: "kavitha",
           output_audio_codec: "mp3"
@@ -504,5 +527,14 @@ export class SarvamClient {
           : null,
       audioBase64: payload.audios[0]
     };
+  }
+
+  async synthesizeKannada(
+    text: string
+  ): Promise<{ requestId: string | null; audioBase64: string }> {
+    return this.synthesizeSpeech({
+      text,
+      languageCode: "kn-IN"
+    });
   }
 }

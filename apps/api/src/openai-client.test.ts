@@ -21,6 +21,20 @@ describe("OpenAiPacClient", () => {
             topic: "medications",
             uncertainty: true
           }
+        ],
+        checklistProposals: [
+          {
+            itemId: "medications",
+            state: "uncertain",
+            value: "Blood thinner reported; exact name not remembered.",
+            sourceSegmentIds: ["seg-2"]
+          },
+          {
+            itemId: "diagnosis",
+            state: "captured",
+            value: "ASA II",
+            sourceSegmentIds: ["seg-2"]
+          }
         ]
       }
     });
@@ -44,7 +58,9 @@ describe("OpenAiPacClient", () => {
       }
     ];
 
-    const result = await client.structurePacConversation(segments);
+    const result = await client.structurePacConversation(segments, [
+      { itemId: "medications", label: "Current or recent medicines" }
+    ]);
 
     expect(result.turns).toEqual([
       {
@@ -67,5 +83,45 @@ describe("OpenAiPacClient", () => {
     );
     expect(result.customerSummary).toContain("doctor review");
     expect(JSON.stringify(result.turns)).not.toContain("blood thinner");
+    expect(result.checklistProposals).toEqual([
+      expect.objectContaining({
+        itemId: "medications",
+        sourceSegmentIds: ["seg-2"]
+      })
+    ]);
+    const userInput = JSON.parse(request.input[1].content);
+    expect(userInput.checklistItems).toEqual([
+      { itemId: "medications", label: "Current or recent medicines" }
+    ]);
+  });
+
+  it("requests bounded checklist suggestions for an unknown procedure", async () => {
+    const parse = vi.fn().mockResolvedValue({
+      id: "run-unknown-1",
+      output_parsed: {
+        suggestions: [
+          {
+            categoryId: "history",
+            question: "Was relevant reported history discussed?",
+            rationale: "Supports procedure-specific documentation review."
+          }
+        ]
+      }
+    });
+    const client = new OpenAiPacClient("openai-key", { responses: { parse } });
+
+    const result = await client.suggestChecklistForUnknownProcedure({
+      procedure: "Unlisted synthetic procedure",
+      existingItems: [{ itemId: "medical_history", label: "Medical history" }],
+      categoryIds: ["history"]
+    });
+
+    expect(result).toMatchObject({
+      modelRunId: "run-unknown-1",
+      suggestions: [expect.objectContaining({ categoryId: "history" })]
+    });
+    expect(JSON.stringify(parse.mock.calls[0]?.[0].input)).toContain(
+      "Unlisted synthetic procedure"
+    );
   });
 });

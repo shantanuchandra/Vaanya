@@ -1,4 +1,8 @@
-import { EncounterSchema, type Encounter } from "@vaanaya/contracts";
+import {
+  EncounterSchema,
+  withEvaluatedChecklist,
+  type Encounter
+} from "@vaanaya/contracts";
 import { createDemoEncounter } from "./demo-encounter";
 
 type DemoProfile = {
@@ -140,7 +144,20 @@ function encounterFromProfile(profile: DemoProfile): Encounter {
       ? `Please describe: ${profile.focusLabel}.`
       : profile.focusValue;
 
-  return EncounterSchema.parse({
+  const focusId =
+    /allerg/i.test(profile.focusLabel)
+      ? "allergies"
+      : /previous anesthesia/i.test(profile.focusLabel)
+        ? "previous_anesthesia"
+        : /bleeding/i.test(profile.focusLabel)
+          ? "bleeding_history"
+          : /fasting|reflux/i.test(profile.focusLabel)
+            ? "fasting"
+            : /medicine|blood thinner|diabetes/i.test(profile.focusLabel)
+              ? "medications"
+              : "medical_history";
+
+  return withEvaluatedChecklist(EncounterSchema.parse({
     id: profile.id,
     patient: {
       id: `patient-${profile.id}`,
@@ -154,12 +171,20 @@ function encounterFromProfile(profile: DemoProfile): Encounter {
     state: profile.state,
     consentRecorded: true,
     sourceType: "uploaded_mp4",
-    requiredFieldIds: isUploaded ? [] : ["focus"],
+    checklistContext: {
+      templateId: "synthetic-pac",
+      version: "synthetic-pac-v1",
+      contextFlags:
+        profile.pregnancyQuestionApplicable === true
+          ? ["pregnancy_question_applicable"]
+          : []
+    },
+    requiredFieldIds: isUploaded ? [] : [focusId],
     proposals: isUploaded
       ? []
       : [
           {
-            id: "focus",
+            id: focusId,
             label: profile.focusLabel,
             state: profile.focusState,
             value: profile.focusValue,
@@ -195,7 +220,7 @@ function encounterFromProfile(profile: DemoProfile): Encounter {
         }
       }
     ]
-  });
+  }));
 }
 
 export function createDemoEncounters(): Encounter[] {

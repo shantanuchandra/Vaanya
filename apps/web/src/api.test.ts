@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  deferChecklistItemRequest,
   getRecordings,
   setAccessTokenProvider,
   transcribeEncounterSpeech,
@@ -123,5 +124,38 @@ describe("speech API", () => {
     expect(fetcher.mock.calls[0]![0]).toBe(
       "/api/encounters/demo/speech?languageCode=hi-IN"
     );
+  });
+
+  it("records a clinician deferral reason through the checklist route", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: "demo",
+        patientReference: "SYN-PAC-042",
+        procedure: "Procedure",
+        preferredLanguage: "hi-IN",
+        state: "clinician_review",
+        consentRecorded: true,
+        requiredFieldIds: [],
+        proposals: [],
+        transcript: [],
+        audit: []
+      })
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await deferChecklistItemRequest(
+      "demo",
+      "medical_history",
+      "Outside records requested"
+    );
+
+    expect(fetcher.mock.calls[0]).toMatchObject([
+      "/api/encounters/demo/checklist/medical_history/defer",
+      {
+        method: "POST",
+        body: JSON.stringify({ reason: "Outside records requested" })
+      }
+    ]);
   });
 });

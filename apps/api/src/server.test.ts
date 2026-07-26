@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildServer } from "./server";
+import { createDemoEncounter } from "./demo-encounter";
+import { MemoryEncounterStore } from "./encounter-store";
 import type { DiarizedSegment, TranscriptionInput } from "./sarvam-client";
 
 const servers: Awaited<ReturnType<typeof buildServer>>[] = [];
@@ -49,6 +51,84 @@ describe("encounter API", () => {
           item.patient.displayName
       )
     ).toContain("Ananya Rao");
+  });
+
+  it("translates the patient summary and synthesizes audio in the selected Sarvam language", async () => {
+    const demoWithSummary = {
+      ...createDemoEncounter(),
+      customerSummary:
+        "Your PAC recording is ready for doctor review. Please bring your medicine strip."
+    };
+    const calls: Array<{ kind: string; languageCode?: string; text: string }> = [];
+    const server = await buildServer({
+      store: new MemoryEncounterStore([demoWithSummary]),
+      authenticator: testAuthenticator,
+      sarvamClient: {
+        transcribe: async () => {
+          throw new Error("not used");
+        },
+        extractPacSuggestions: async () => [],
+        translateToKannada: async input => ({
+          requestId: "legacy-kn",
+          translatedText: input
+        }),
+        synthesizeKannada: async text => ({
+          requestId: "legacy-tts",
+          audioBase64: Buffer.from(text).toString("base64")
+        }),
+        translateText: async input => {
+          calls.push({
+            kind: "translate",
+            languageCode: input.targetLanguageCode,
+            text: input.text
+          });
+          return {
+            requestId: "translate-hi",
+            translatedText: "आपकी पीएसी रिकॉर्डिंग डॉक्टर की समीक्षा के लिए तैयार है।"
+          };
+        },
+        synthesizeSpeech: async input => {
+          calls.push({
+            kind: "speech",
+            languageCode: input.languageCode,
+            text: input.text
+          });
+          return {
+            requestId: "speech-hi",
+            audioBase64: "aGVsbG8="
+          };
+        }
+      }
+    });
+    servers.push(server);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/patient-summary-handoff",
+      headers: authorized,
+      payload: { languageCode: "hi-IN" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      sourceText: demoWithSummary.customerSummary,
+      translatedText: expect.stringContaining("डॉक्टर"),
+      languageCode: "hi-IN",
+      audioBase64: "aGVsbG8=",
+      audioMimeType: "audio/mpeg"
+    });
+    expect(calls).toEqual([
+      {
+        kind: "translate",
+        languageCode: "hi-IN",
+        text: demoWithSummary.customerSummary
+      },
+      {
+        kind: "speech",
+        languageCode: "hi-IN",
+        text: "आपकी पीएसी रिकॉर्डिंग डॉक्टर की समीक्षा के लिए तैयार है।"
+      }
+    ]);
   });
 
   it("rejects protected encounter access without a bearer token", async () => {
@@ -515,6 +595,14 @@ describe("encounter API", () => {
                 topic: "medications",
                 uncertainty: true
               }
+            ],
+            checklistProposals: [
+              {
+                itemId: "medications",
+                state: "uncertain",
+                value: "Blood thinner reported; exact name not remembered.",
+                sourceSegmentIds: ["seg-2"]
+              }
             ]
           };
         }
@@ -658,6 +746,107 @@ describe("encounter API", () => {
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({
       code: "WORKFLOW_CONFLICT"
+    });
+  });
+
+  it("allows a clinician to enter a checklist item", async () => {
+    const server = await buildServer({ authenticator: testAuthenticator });
+    servers.push(server);
+    const response = await server.inject({
+      method: "PATCH",
+      url: "/api/encounters/demo/checklist/documents",
+      headers: authorized,
+      payload: { value: "Prescription reviewed by clinician." }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(
+      response
+        .json()
+        .checklist.items.find((item: { id: string }) => item.id === "documents")
+    ).toMatchObject({
+      status: "answered",
+      sourceTurnIds: []
+    });
+  });
+
+  it("rejects deferral of a non-deferrable checklist item", async () => {
+    const server = await buildServer({ authenticator: testAuthenticator });
+    servers.push(server);
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/checklist/clinician_conclusion/defer",
+      headers: authorized,
+      payload: { reason: "Not completed" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().message).toMatch(/cannot be deferred/i);
+  });
+
+  it("reviews and publishes an OpenAI checklist for an unknown procedure", async () => {
+    const server = await buildServer({
+      authenticator: testAuthenticator,
+      openAiPacClient: {
+        structurePacConversation: async () => ({
+          customerSummary: "Synthetic note for doctor review.",
+          turns: [],
+          checklistProposals: []
+        }),
+        suggestChecklistForUnknownProcedure: async () => ({
+          modelRunId: "run-unknown-1",
+          suggestions: [
+            {
+              categoryId: "history",
+              question: "Was relevant reported history discussed?",
+              rationale: "Supports procedure-specific documentation review."
+            }
+          ]
+        })
+      }
+    });
+    servers.push(server);
+    const created = await server.inject({
+      method: "POST",
+      url: "/api/encounters",
+      headers: authorized,
+      payload: {
+        patientId: "patient-demo-sulochana",
+        procedure: "Unlisted synthetic procedure",
+        preferredLanguage: "en-IN",
+        sourceType: "uploaded_mp4"
+      }
+    });
+    expect(created.statusCode).toBe(201);
+    const encounter = created.json();
+    expect(encounter.checklistSuggestions).toHaveLength(1);
+    expect(encounter.checklistSuggestions[0].approvalState).toBe(
+      "pending_clinician_review"
+    );
+
+    const pendingPublish = await server.inject({
+      method: "POST",
+      url: `/api/encounters/${encounter.id}/checklist-suggestions/publish`,
+      headers: authorized
+    });
+    expect(pendingPublish.statusCode).toBe(409);
+
+    const approved = await server.inject({
+      method: "POST",
+      url: `/api/encounters/${encounter.id}/checklist-suggestions/${encounter.checklistSuggestions[0].id}/approve`,
+      headers: authorized
+    });
+    expect(approved.statusCode).toBe(200);
+
+    const published = await server.inject({
+      method: "POST",
+      url: `/api/encounters/${encounter.id}/checklist-suggestions/publish`,
+      headers: authorized
+    });
+    expect(published.statusCode).toBe(200);
+    expect(published.json().checklistLibrary).toMatchObject({
+      normalizedProcedure: "unlisted synthetic procedure",
+      version: 1
     });
   });
 

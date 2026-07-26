@@ -7,7 +7,7 @@ describe("synthetic PAC cohort", () => {
 
     expect(encounters).toHaveLength(10);
     expect(encounters.map(item => item.patient?.displayName)).toEqual([
-      "Shantanu Chandra",
+      "Sulochana Patel",
       "Udayan Walvekar",
       "Abhishek Patil",
       "Ameeth Dubey",
@@ -32,8 +32,27 @@ describe("synthetic PAC cohort", () => {
     ).toBe("Laparoscopic hysterectomy");
     expect(
       encounters.find(
-        item => item.patient?.displayName === "Shantanu Chandra"
+        item => item.patient?.displayName === "Sulochana Patel"
       )?.procedure
     ).toBe("Laparoscopic hernia repair");
+    expect(encounters[0]?.patient?.sex).toBe("female");
+    expect(
+      new Set(encounters.map(item => item.checklist?.procedureFamily))
+    ).toEqual(
+      new Set([
+        "laparoscopic_abdominal",
+        "hysterectomy",
+        "knee_replacement",
+        "upper_gi_endoscopy",
+        "urological",
+        "cataract",
+        "breast"
+      ])
+    );
+    expect(
+      encounters.every(
+        item => item.checklist?.version === "synthetic-pac-v1"
+      )
+    ).toBe(true);
   });
 });
