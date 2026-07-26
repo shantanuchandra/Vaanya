@@ -1,0 +1,25 @@
+# Environment variables
+.env
+.env*.local
+.env.production
+.env.development
+
+# Dependencies
+node_modules/
+/node_modules
+
+# Build outputs
+dist/
+build/
+.next/
+.turbo/
+coverage/
+
+# System / OS
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# MCP & Temporary files
+.playwright-mcp/

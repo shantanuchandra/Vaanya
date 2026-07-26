@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vaanaya.example/schemas/pac-test-case-1.0.0.json",
+  "title": "Vaanaya synthetic PAC test case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id",
+    "schema_version",
+    "title",
+    "language",
+    "patient_profile",
+    "scenario_tags",
+    "conversation",
+    "hidden_facts",
+    "expected_pac",
+    "source_expectations",
+    "uncertainties",
+    "required_clarifications",
+    "prohibited_inferences",
+    "expected_workflow",
+    "assertions",
+    "provenance",
+    "clinical_review"
+  ],
+  "properties": {
+    "case_id": { "type": "string", "pattern": "^PAC-SYN-[0-9]{4}$" },
+    "schema_version": { "const": "1.0.0" },
+    "title": { "type": "string", "minLength": 1 },
+    "language": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "primary", "code_mixed"],
+      "properties": {
+        "path": { "enum": ["hi-hinglish", "kn-kanglish", "en"] },
+        "primary": { "type": "string", "minLength": 2 },
+        "code_mixed": { "type": "boolean" }
+      }
+    },
+    "patient_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["synthetic", "age_band", "procedure_context", "communication_factors"],
+      "properties": {
+        "synthetic": { "const": true },
+        "age_band": { "type": "string" },
+        "procedure_context": { "type": "string" },
+        "communication_factors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "scenario_tags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "ambiguity_types", "difficulty", "workflow_stages"],
+      "properties": {
+        "family": { "type": "string", "minLength": 1 },
+        "ambiguity_types": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "difficulty": { "enum": ["D1", "D2", "D3", "D4", "D5"] },
+        "workflow_stages": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "conversation": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["turn_id", "speaker", "language", "text", "confidence"],
+        "properties": {
+          "turn_id": { "type": "string", "minLength": 1 },
+          "speaker": { "enum": ["clinician", "patient", "caregiver", "system"] },
+          "language": { "type": "string" },
+          "text": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "hidden_facts": { "type": "object" },
+    "expected_pac": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "value", "source_turn_ids"],
+        "properties": {
+          "state": {
+            "enum": ["captured", "uncertain", "missing", "intentionally_skipped", "clinician_entered"]
+          },
+          "value": { "type": ["string", "null"] },
+          "source_turn_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "source_expectations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "turn_ids"],
+        "properties": {
+          "field": { "type": "string" },
+          "turn_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "reason"],
+        "properties": {
+          "field": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "required_clarifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["intent", "prompt"],
+        "properties": {
+          "intent": { "type": "string" },
+          "prompt": { "type": "string" }
+        }
+      }
+    },
+    "prohibited_inferences": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "expected_workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clinician_review_required",
+        "explicit_signoff_required",
+        "autonomous_signoff_allowed",
+        "patient_summary_from_approved_content_only"
+      ],
+      "properties": {
+        "clinician_review_required": { "const": true },
+        "explicit_signoff_required": { "const": true },
+        "autonomous_signoff_allowed": { "const": false },
+        "patient_summary_from_approved_content_only": { "const": true }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "path", "expected"],
+        "properties": {
+          "type": { "type": "string" },
+          "path": { "type": "string" },
+          "expected": {}
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["template_id", "generator_version", "evidence_classification"],
+      "properties": {
+        "template_id": { "type": "string" },
+        "generator_version": { "const": "1.0.0" },
+        "evidence_classification": {
+          "type": "array",
+          "items": {
+            "enum": ["published_evidence", "clinician_observation", "synthetic_assumption"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "clinical_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reviewer_role", "notes"],
+      "properties": {
+        "status": { "enum": ["unreviewed", "approved", "needs_revision", "unsafe"] },
+        "reviewer_role": { "const": "anesthesiologist" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

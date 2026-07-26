@@ -1,0 +1,23 @@
+{
+  "name": "vaanaya",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "start": "npm start -w @vaanaya/api",
+    "dev:web": "npm run dev -w @vaanaya/web",
+    "dev:api": "npm run dev -w @vaanaya/api",
+    "seed:demo": "node --env-file=.env scripts/seed-demo.mjs",
+    "simulate:scenarios": "tsx scripts/simulate-scenarios.ts",
+    "test": "npm run test -ws --if-present && node --test test-cases/tests/*.test.mjs",
+    "typecheck": "npm run typecheck -ws --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
