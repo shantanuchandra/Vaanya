@@ -42,6 +42,25 @@ export const FieldProposalSchema = z.object({
   required: z.boolean()
 });
 
+export const PatientSummarySchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1),
+  mobileNumber: z.string().min(1),
+  mobileLast4: z.string().min(4).max(4)
+});
+
+export type PatientSummary = z.infer<typeof PatientSummarySchema>;
+
+export const RecommendationQuestionSchema = z.object({
+  id: z.string().min(1),
+  question: z.string().min(1),
+  reason: z.string().min(1)
+});
+
+export type RecommendationQuestion = z.infer<
+  typeof RecommendationQuestionSchema
+>;
+
 export const AuditEventSchema = z.object({
   id: z.string(),
   action: z.string(),
@@ -52,11 +71,17 @@ export const AuditEventSchema = z.object({
 
 export const EncounterSchema = z.object({
   id: z.string().min(1),
+  patient: PatientSummarySchema.optional(),
   patientReference: z.string().min(1),
   procedure: z.string().min(1),
   preferredLanguage: z.string().min(2),
   state: EncounterStateSchema,
   consentRecorded: z.boolean(),
+  sourceType: z.enum(["live", "uploaded_mp4"]).optional(),
+  secondOpinionRequested: z.boolean().optional(),
+  secondOpinionRequestedBy: z.string().min(1).optional(),
+  secondOpinionRequestedAt: z.string().datetime().optional(),
+  recommendationQuestions: z.array(RecommendationQuestionSchema).optional(),
   requiredFieldIds: z.array(z.string()),
   proposals: z.array(FieldProposalSchema),
   transcript: z.array(TranscriptTurnSchema),

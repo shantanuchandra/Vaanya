@@ -21,7 +21,34 @@ export type PacSuggestion = {
   sourceTurnIds: string[];
 };
 
+export type DiarizedSegment = {
+  id: string;
+  speakerLabel: string;
+  originalText: string;
+  translatedText: string;
+  startSeconds: number;
+  endSeconds: number;
+};
+
 type Fetcher = typeof fetch;
+
+function assertRecord(value: unknown, message: string): Record<string, unknown> {
+  if (!value || typeof value !== "object") throw new Error(message);
+  return value as Record<string, unknown>;
+}
+
+function getUrl(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "url" in value) {
+    const url = (value as { url?: unknown }).url;
+    return typeof url === "string" ? url : null;
+  }
+  if (value && typeof value === "object" && "file_url" in value) {
+    const url = (value as { file_url?: unknown }).file_url;
+    return typeof url === "string" ? url : null;
+  }
+  return null;
+}
 
 export class SarvamClient {
   constructor(
@@ -177,6 +204,225 @@ export class SarvamClient {
         typeof payload.language_probability === "number"
           ? payload.language_probability
           : null
+    };
+  }
+
+  async processDiarizedTranslation(input: TranscriptionInput): Promise<{
+    requestId: string | null;
+    segments: DiarizedSegment[];
+  }> {
+    const createResponse = await this.fetcher(
+      "https://api.sarvam.ai/speech-to-text/job/v1",
+      {
+        method: "POST",
+        headers: {
+          "api-subscription-key": this.apiKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          job_parameters: {
+            model: "saaras:v3",
+            mode: "translate",
+            language_code:
+              input.languageCode === "unknown" ? "hi-IN" : input.languageCode,
+            with_diarization: true,
+            num_speakers: 2
+          }
+        })
+      }
+    );
+    if (!createResponse.ok) {
+      throw new Error(`Sarvam batch job creation failed (${createResponse.status}).`);
+    }
+    const createPayload = assertRecord(
+      await createResponse.json(),
+      "Sarvam returned an invalid batch job response."
+    );
+    const jobId = createPayload.job_id;
+    if (typeof jobId !== "string") {
+      throw new Error("Sarvam returned an invalid batch job response.");
+    }
+
+    const uploadResponse = await this.fetcher(
+      "https://api.sarvam.ai/speech-to-text/job/v1/upload-files",
+      {
+        method: "POST",
+        headers: {
+          "api-subscription-key": this.apiKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ job_id: jobId, files: [input.filename] })
+      }
+    );
+    if (!uploadResponse.ok) {
+      throw new Error(`Sarvam batch upload URL failed (${uploadResponse.status}).`);
+    }
+    const uploadPayload = assertRecord(
+      await uploadResponse.json(),
+      "Sarvam returned an invalid upload URL response."
+    );
+    const uploadUrls = assertRecord(
+      uploadPayload.upload_urls,
+      "Sarvam returned an invalid upload URL response."
+    );
+    const uploadUrl = getUrl(uploadUrls[input.filename]);
+    if (!uploadUrl) {
+      throw new Error("Sarvam returned an invalid upload URL response.");
+    }
+    const putResponse = await this.fetcher(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "content-type": input.mimeType,
+        "x-ms-blob-type": "BlockBlob"
+      },
+      body: Uint8Array.from(input.bytes)
+    });
+    if (!putResponse.ok) {
+      throw new Error(`Sarvam batch file upload failed (${putResponse.status}).`);
+    }
+
+    const startResponse = await this.fetcher(
+      `https://api.sarvam.ai/speech-to-text/job/v1/${jobId}/start`,
+      {
+        method: "POST",
+        headers: {
+          "api-subscription-key": this.apiKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      }
+    );
+    if (!startResponse.ok) {
+      throw new Error(`Sarvam batch start failed (${startResponse.status}).`);
+    }
+
+    let statusPayload: Record<string, unknown> | null = null;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const statusResponse = await this.fetcher(
+        `https://api.sarvam.ai/speech-to-text/job/v1/${jobId}/status`,
+        {
+          method: "GET",
+          headers: {
+            "api-subscription-key": this.apiKey,
+            "content-type": "application/json"
+          }
+        }
+      );
+      if (!statusResponse.ok) {
+        throw new Error(`Sarvam batch status failed (${statusResponse.status}).`);
+      }
+      statusPayload = assertRecord(
+        await statusResponse.json(),
+        "Sarvam returned an invalid batch status response."
+      );
+      const state = statusPayload.job_state;
+      if (state === "Completed" || state === "PartiallyCompleted") break;
+      if (state === "Failed") {
+        throw new Error("Sarvam batch job failed.");
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+    if (
+      !statusPayload ||
+      !["Completed", "PartiallyCompleted"].includes(
+        String(statusPayload.job_state)
+      )
+    ) {
+      throw new Error("Sarvam batch job timed out.");
+    }
+
+    const jobDetails = Array.isArray(statusPayload.job_details)
+      ? statusPayload.job_details
+      : [];
+    const outputFile = jobDetails
+      .flatMap(detail => {
+        const outputs =
+          detail && typeof detail === "object" && "outputs" in detail
+            ? (detail as { outputs?: unknown }).outputs
+            : [];
+        return Array.isArray(outputs) ? outputs : [];
+      })
+      .map(output =>
+        output && typeof output === "object" && "file_name" in output
+          ? (output as { file_name?: unknown }).file_name
+          : null
+      )
+      .find((fileName): fileName is string => typeof fileName === "string");
+    if (!outputFile) {
+      throw new Error("Sarvam returned no batch output file.");
+    }
+
+    const downloadResponse = await this.fetcher(
+      "https://api.sarvam.ai/speech-to-text/job/v1/download-files",
+      {
+        method: "POST",
+        headers: {
+          "api-subscription-key": this.apiKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ job_id: jobId, files: [outputFile] })
+      }
+    );
+    if (!downloadResponse.ok) {
+      throw new Error(`Sarvam batch download URL failed (${downloadResponse.status}).`);
+    }
+    const downloadPayload = assertRecord(
+      await downloadResponse.json(),
+      "Sarvam returned an invalid download URL response."
+    );
+    const downloadUrls = assertRecord(
+      downloadPayload.download_urls,
+      "Sarvam returned an invalid download URL response."
+    );
+    const downloadUrl = getUrl(downloadUrls[outputFile]);
+    if (!downloadUrl) {
+      throw new Error("Sarvam returned an invalid download URL response.");
+    }
+    const resultResponse = await this.fetcher(downloadUrl);
+    if (!resultResponse.ok) {
+      throw new Error(`Sarvam batch result download failed (${resultResponse.status}).`);
+    }
+    const resultPayload = assertRecord(
+      await resultResponse.json(),
+      "Sarvam returned an invalid diarized transcription response."
+    );
+    const diarizedTranscript = assertRecord(
+      resultPayload.diarized_transcript,
+      "Sarvam returned an invalid diarized transcription response."
+    );
+    const entries = Array.isArray(diarizedTranscript.entries)
+      ? diarizedTranscript.entries
+      : [];
+    return {
+      requestId:
+        typeof resultPayload.request_id === "string"
+          ? resultPayload.request_id
+          : null,
+      segments: entries.map((entry, index) => {
+        const row = assertRecord(
+          entry,
+          "Sarvam returned an invalid diarized segment."
+        );
+        const transcript =
+          typeof row.transcript === "string" ? row.transcript : "";
+        const speakerId =
+          typeof row.speaker_id === "string" ? row.speaker_id : "unknown";
+        return {
+          id: `seg-${index + 1}`,
+          speakerLabel:
+            speakerId === "unknown" ? "Speaker unknown" : `Speaker ${speakerId}`,
+          originalText: transcript,
+          translatedText: transcript,
+          startSeconds:
+            typeof row.start_time_seconds === "number"
+              ? row.start_time_seconds
+              : 0,
+          endSeconds:
+            typeof row.end_time_seconds === "number"
+              ? row.end_time_seconds
+              : 0
+        };
+      })
     };
   }
 

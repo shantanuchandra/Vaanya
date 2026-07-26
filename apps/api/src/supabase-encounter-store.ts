@@ -1,5 +1,9 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { EncounterSchema, type Encounter } from "@vaanaya/contracts";
+import {
+  EncounterSchema,
+  type Encounter,
+  type PatientSummary
+} from "@vaanaya/contracts";
 import type { EncounterStore } from "./encounter-store";
 
 type EncounterRow = {
@@ -230,5 +234,17 @@ export class SupabaseEncounterStore implements EncounterStore {
     }
 
     return (await this.get(encounter.id)) ?? encounter;
+  }
+
+  async searchPatients(): Promise<PatientSummary[]> {
+    throw new Error("Supabase patient search requires the longitudinal PAC migration.");
+  }
+
+  async createPatient(): Promise<PatientSummary> {
+    throw new Error("Supabase patient creation requires the longitudinal PAC migration.");
+  }
+
+  async createEncounter(): Promise<Encounter> {
+    throw new Error("Supabase encounter creation requires the longitudinal PAC migration.");
   }
 }

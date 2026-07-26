@@ -39,7 +39,7 @@ Supabase database migration: `20260726055059_initial_vaanaya_schema.sql`
 
 | Area | Result | Evidence |
 |---|---:|---|
-| Automated application and corpus tests | Pass | 61 tests passed |
+| Automated application and corpus tests | Pass | 62 tests passed |
 | TypeScript typecheck | Pass | All workspaces |
 | Production build | Pass | React and API built successfully |
 | Dependency audit | Pass | Zero known vulnerabilities |
@@ -234,6 +234,24 @@ Production smoke check:
 ```bash
 curl -fsS https://vaanaya-production.up.railway.app/health
 ```
+
+## Full recording smoke — 2026-07-26
+
+- Production deployment: `https://vaanaya-production.up.railway.app`
+- Synthetic recording: `Examples/WhatsApp Audio 2026-07-26 at 09.14.01.mp4`
+- Login: Suruchi demo clinician account verified through Supabase Auth.
+- Sarvam: Batch speech-to-text translation with diarization completed on the
+  full MP4; local provider smoke returned 104 segments.
+- OpenAI: PAC-aware structuring completed; local route smoke categorized
+  administrative, history, medications, prior anesthesia, allergies, fasting,
+  and other segments.
+- Browser QA: in-app browser confirmed production login, patient selection,
+  `Diarizing and translating with Sarvam...` disabled state, and rendered
+  Evidence Rail with `Synthetic demo recording - clinician review required`,
+  segment IDs, timestamps, speaker labels, and `Sarvam translated evidence`.
+- Storage note: Supabase Storage was not needed for this path because Sarvam
+  Batch provides temporary upload/download URLs. Audio is not persisted by
+  Vaanaya in the vanilla demo path.
 
 ## Product boundary
 

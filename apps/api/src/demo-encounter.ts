@@ -3,6 +3,12 @@ import { EncounterSchema, type Encounter } from "@vaanaya/contracts";
 export function createDemoEncounter(): Encounter {
   return EncounterSchema.parse({
     id: "demo",
+    patient: {
+      id: "patient-demo-ravi",
+      displayName: "Ravi Kumar",
+      mobileNumber: "+919900001111",
+      mobileLast4: "1111"
+    },
     patientReference: "SYN-PAC-042",
     procedure: "Elective abdominal procedure",
     preferredLanguage: "hi-IN",
@@ -106,4 +112,3 @@ export function createDemoEncounter(): Encounter {
     audit: []
   });
 }
-
