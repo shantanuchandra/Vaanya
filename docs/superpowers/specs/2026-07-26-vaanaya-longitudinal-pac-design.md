@@ -4,8 +4,8 @@
 
 Extend Vaanaya so an authenticated doctor can create or select a patient,
 conduct a live PAC or upload an MP4 recording, review previous PACs and their
-conversations, and create a new signed PAC that selectively merges previous and
-current evidence.
+conversations, optionally raise a second-opinion request for another PAC, and
+create a new signed PAC that selectively merges previous and current evidence.
 
 This is a synthetic-data MVP. Voice matching assists the doctor but does not
 establish identity or block access.
@@ -23,6 +23,7 @@ The MVP includes:
 - live PAC capture and uploaded MP4 audio ingestion;
 - longitudinal, immutable signed PAC versions;
 - replayable prior recordings with synchronized transcripts and translations;
+- doctor-raised second-opinion requests on PACs and conversation listings;
 - field-level comparison and selective carry-forward from the latest signed PAC;
 - Dr Suruchi and Dr Balkar simulation scenarios.
 
@@ -113,6 +114,11 @@ by an authorized doctor.
 - `voice_similarity_score`
 - `voice_warning_acknowledged_by`
 - `voice_warning_acknowledged_at`
+- `second_opinion_requested`: boolean
+- `second_opinion_requested_by`
+- `second_opinion_requested_at`
+- `second_opinion_status`: `not_requested`, `requested`, or `completed`
+- `second_opinion_assignee_doctor_id`
 - `created_at`
 - `signed_at`
 
@@ -120,6 +126,17 @@ Existing transcript turns, field proposals, evidence links, and clinician edits
 remain linked to the encounter. A signed PAC is immutable. A returning visit
 creates a new encounter linked to the latest signed PAC; it never overwrites the
 older record.
+
+### second-opinion listing behavior
+
+Historical and active conversation listings must expose second-opinion state so
+doctors can triage follow-up work quickly. PACs with an active second-opinion
+request appear visually highlighted in the listings and are filterable by:
+
+- `All PACs`
+- `Needs my second opinion`
+- `Needs another doctor's second opinion`
+- `Second opinion completed`
 
 ### merge_decisions
 
@@ -154,8 +171,11 @@ doctor, and links to both sets of evidence.
    continue.
 8. The current draft is compared field-by-field with the latest signed PAC.
 9. Changed, missing, or uncertain fields become conflict cards.
-10. The doctor resolves every conflict and required uncertainty.
-11. The doctor signs a new immutable PAC version.
+10. The doctor may raise a second-opinion request for another PAC doctor.
+11. The conversation listing highlights the PAC as second-opinion requested and
+    supports filtering for second-opinion workload.
+12. The doctor resolves every conflict and required uncertainty.
+13. The doctor signs a new immutable PAC version.
 
 ## Field-Level Merge Experience
 
@@ -187,11 +207,14 @@ Every historical PAC exposes a `Previous conversation` view containing:
 - original language and translation;
 - timestamps;
 - transcription confidence;
+- second-opinion status and the requesting doctor when present;
 - links from PAC fields to the relevant audio and transcript segments.
 
 Selecting a field-level evidence link seeks the audio player to the earliest
 linked segment and highlights all supporting turns. The doctor can also play
-the complete recording.
+the complete recording. Conversation listings visually highlight second-opinion
+PACs and expose a filter that narrows the list to PACs needing a second opinion
+from the current doctor or from another doctor.
 
 ## Audio and Voice Processing
 
@@ -249,6 +272,7 @@ assistance rather than authentication.
 - MP4 acceptance and corrupt/audio-less MP4 rejection;
 - live and uploaded recordings entering the same processing contract;
 - previous recordings and transcript metadata retrieval;
+- second-opinion request persistence, highlighting, and filtering;
 - immutable signed PAC history;
 - latest-signed-PAC selection;
 - merge conflict creation for changed, missing, and uncertain fields;
@@ -263,10 +287,12 @@ Run two simulations against the same returning synthetic patient:
 
 1. Dr Suruchi finds the patient by name and mobile, receives a voice match,
    reviews a previous conversation, uploads or records the new PAC, resolves
-   merge conflicts carefully, and signs the new version.
+   merge conflicts carefully, optionally requests a second opinion for another
+   doctor, and signs the new version.
 2. Dr Balkar opens the same patient, receives a warning or incomplete capture,
-   skips evidence review, and attempts to sign. The interface must retain
-   uncertainty and block sign-off until the required review is complete.
+   sees highlighted second-opinion PACs in the listing, skips evidence review,
+   and attempts to sign. The interface must retain uncertainty and block
+   sign-off until the required review is complete.
 
 The final test also verifies that the first signed PAC and its recording remain
 unchanged and replayable after the second PAC is created.
@@ -278,6 +304,7 @@ unchanged and replayable after the second PAC is created.
 - A real speaker embedding produces an advisory comparison against enrollment.
 - Live capture and MP4 audio upload both create reviewable PAC drafts.
 - Previous conversations are visible, replayable, and linked to PAC evidence.
+- PACs needing a second opinion are highlighted and filterable in conversation listings.
 - A new doctor can selectively merge previous and current PAC fields.
 - Signed PAC versions remain immutable and auditable.
 - The careful-doctor path succeeds and the poor-doctor path exposes or blocks

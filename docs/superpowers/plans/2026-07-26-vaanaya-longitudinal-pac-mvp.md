@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a longitudinal PAC workflow where a clinician can add or select a patient, run a live or uploaded MP4 encounter, review previous conversations, resolve field-level merge conflicts against the latest signed PAC, and sign a new immutable PAC version.
+**Goal:** Build a longitudinal PAC workflow where a clinician can add or select a patient, run a live or uploaded MP4 encounter, review previous conversations, optionally raise a second-opinion request, resolve field-level merge conflicts against the latest signed PAC, and sign a new immutable PAC version.
 
 **Architecture:** Extend the existing `Encounter`-driven API and React review workspace rather than introducing a second application shell. Store authoritative patient identity and encounter lineage in Supabase, run live and uploaded audio through one ingestion contract, and keep voice biometrics advisory-only with explicit clinician acknowledgement on uncertain or mismatched comparisons.
 
@@ -19,13 +19,14 @@
 - Unchanged fields appear as carried forward and remain individually reviewable. They do not require a merge decision.
 - Sign-off is disabled until all required uncertainty and every conflict is resolved.
 - The product must visibly label voice matching as MVP identity assistance rather than authentication.
+- PACs with an active second-opinion request must be visually highlighted in conversation listings and filterable by second-opinion queue state.
 
 ---
 
 ## File Structure
 
 - `packages/contracts/src/index.ts`
-  Extend the shared encounter schema with patient identity, recording metadata, voice-match status, previous encounter lineage, merge conflicts, and previous conversation summaries.
+  Extend the shared encounter schema with patient identity, recording metadata, voice-match status, previous encounter lineage, second-opinion state, merge conflicts, and previous conversation summaries.
 - `packages/contracts/src/workflow.test.ts`
   Lock the new signing and merge-resolution rules at the contract layer before API work starts.
 - `supabase/migrations/*_longitudinal_pac_mvp.sql`
@@ -35,11 +36,11 @@
 - `scripts/simulate-scenarios.ts`
   Add Dr Suruchi and Dr Balkar longitudinal scenarios against the same patient.
 - `apps/api/src/encounter-store.ts`
-  Expand the store interface beyond `get`/`save` so routes can query patients, history, merge state, and recordings.
+  Expand the store interface beyond `get`/`save` so routes can query patients, history, second-opinion state, merge state, and recordings.
 - `apps/api/src/supabase-encounter-store.ts`
   Implement the new store methods and map Supabase rows into the enriched contract types.
 - `apps/api/src/server.ts`
-  Add patient lookup/create, encounter creation, MP4 upload, previous conversation fetch, voice-warning acknowledgement, merge resolution, and longitudinal sign-off routes.
+  Add patient lookup/create, encounter creation, MP4 upload, previous conversation fetch, second-opinion routes, voice-warning acknowledgement, merge resolution, and longitudinal sign-off routes.
 - `apps/api/src/server.test.ts`
   Cover the new end-to-end API contracts, authorization, validation, merge blocking, and warning acknowledgement behavior.
 - `apps/api/src/media-processing.ts`
@@ -51,27 +52,29 @@
 - `apps/api/src/voice-matcher.test.ts`
   Verify `match`, `uncertain`, `mismatch`, and `unavailable` decisions.
 - `apps/web/src/api.ts`
-  Add typed client functions for patient search/create, encounter creation, upload, history fetch, merge resolution, and warning acknowledgement.
+  Add typed client functions for patient search/create, encounter creation, upload, history fetch, second-opinion requests, merge resolution, and warning acknowledgement.
 - `apps/web/src/App.tsx`
   Replace the demo-only loader with the patient workspace shell and longitudinal review flow.
 - `apps/web/src/PatientWorkspace.tsx`
-  Hold patient selection, encounter-start actions, voice warning state, and previous-conversation review.
+  Hold patient selection, encounter-start actions, voice warning state, second-opinion filters, and previous-conversation review.
 - `apps/web/src/PatientPicker.tsx`
   Render the searchable dropdown, inline add-patient form trigger, and masked mobile display.
 - `apps/web/src/AddPatientDialog.tsx`
   Capture name, mobile number, and short voice-enrollment recording.
 - `apps/web/src/EncounterHistoryPanel.tsx`
-  List prior PACs, recordings, signing doctors, and open the previous conversation review.
+  List prior PACs, recordings, signing doctors, second-opinion highlights, and open the previous conversation review.
+- `apps/web/src/SecondOpinionFilter.tsx`
+  Render the conversation-listing filter for `All PACs`, `Needs my second opinion`, `Needs another doctor's second opinion`, and `Second opinion completed`.
 - `apps/web/src/MergeReviewPanel.tsx`
   Render IDE-style merge cards with `Use previous`, `Keep current`, and `Edit merged value`.
 - `apps/web/src/UploadRecordingForm.tsx`
   Upload MP4 recordings and route them through the same draft-creation flow as live capture.
 - `apps/web/src/App.test.tsx`
-  Cover patient selection, warning acknowledgement, previous conversation review, merge conflict blocking, and sign-off.
+  Cover patient selection, warning acknowledgement, second-opinion highlighting/filtering, previous conversation review, merge conflict blocking, and sign-off.
 - `apps/web/src/api.test.ts`
   Lock request shapes for the new patient and encounter routes.
 - `apps/web/src/styles.css`
-  Extend the current visual system for the patient workspace, history rail, merge cards, and upload form without replacing the established brand language.
+  Extend the current visual system for the patient workspace, history rail, second-opinion highlights, merge cards, and upload form without replacing the established brand language.
 - `docs/qa/2026-07-26-buildathon-qa.md`
   Append the new internal-browser acceptance run for Dr Suruchi and Dr Balkar.
 
@@ -87,8 +90,9 @@
   - `VoiceMatchStatusSchema = z.enum(["match", "uncertain", "mismatch", "unavailable"])`
   - `PatientSummarySchema`
   - `RecordingSummarySchema`
-  - `MergeConflictSchema`
+- `MergeConflictSchema`
   - `resolveMergeConflict(encounter: Encounter, command: { fieldId: string; resolution: "use_previous" | "keep_current" | "edited"; value?: string; actorId: string }): Encounter`
+  - `requestSecondOpinion(encounter: Encounter, command: { actorId: string; assigneeDoctorId: string | null }): Encounter`
   - `signEncounter(encounter: Encounter, command: { actorId: string; actorRole: "clinician" | "coordinator" }): Encounter` updated to reject unresolved merge conflicts and unacknowledged voice warnings
 
 - [ ] **Step 1: Write the failing contract tests**
@@ -155,12 +159,25 @@ it("records an edited merge decision with clinician provenance", () => {
     actorId: "clinician-1"
   });
 });
+
+it("marks an encounter as needing a second opinion", () => {
+  const updated = requestSecondOpinion(encounterWithConflict, {
+    actorId: "clinician-1",
+    assigneeDoctorId: "clinician-2"
+  });
+
+  expect(updated.secondOpinion).toMatchObject({
+    status: "requested",
+    requestedBy: "clinician-1",
+    assigneeDoctorId: "clinician-2"
+  });
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npm run test -w @vaanaya/contracts -- src/workflow.test.ts`
-Expected: FAIL with missing `patient`, `voiceMatch`, `mergeConflicts`, or `resolveMergeConflict` support.
+Expected: FAIL with missing `patient`, `voiceMatch`, `secondOpinion`, `mergeConflicts`, or `requestSecondOpinion` support.
 
 - [ ] **Step 3: Write the minimal contract implementation**
 
@@ -210,6 +227,25 @@ export function resolveMergeConflict(
     )
   });
 }
+
+export function requestSecondOpinion(
+  encounterInput: Encounter,
+  command: {
+    actorId: string;
+    assigneeDoctorId: string | null;
+  }
+): Encounter {
+  const encounter = EncounterSchema.parse(encounterInput);
+  return EncounterSchema.parse({
+    ...encounter,
+    secondOpinion: {
+      status: "requested",
+      requestedBy: command.actorId,
+      assigneeDoctorId: command.assigneeDoctorId,
+      requestedAt: new Date().toISOString()
+    }
+  });
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -236,9 +272,10 @@ git commit -m "feat: extend longitudinal PAC contracts"
 - Produces:
   - `patients(display_name, normalized_name, mobile_number, normalized_mobile_number, created_by, organization_id)`
   - `voice_profiles(patient_id, embedding, model_id, model_version, enrollment_recording_id, is_active)`
-  - `recordings(encounter_id, storage_path, media_type, duration_seconds, source_type)`
-  - `merge_decisions(encounter_id, field_key, decision, resolved_value, resolved_by, resolved_at)`
-  - `encounters.previous_encounter_id`, `encounters.respondent_type`, `encounters.source_type`, `encounters.voice_match_status`, `encounters.voice_similarity_score`, `encounters.voice_warning_acknowledged_by`, `encounters.voice_warning_acknowledged_at`
+- `recordings(encounter_id, storage_path, media_type, duration_seconds, source_type)`
+- `merge_decisions(encounter_id, field_key, decision, resolved_value, resolved_by, resolved_at)`
+- `encounters.second_opinion_requested`, `encounters.second_opinion_requested_by`, `encounters.second_opinion_requested_at`, `encounters.second_opinion_status`, `encounters.second_opinion_assignee_doctor_id`
+- `encounters.previous_encounter_id`, `encounters.respondent_type`, `encounters.source_type`, `encounters.voice_match_status`, `encounters.voice_similarity_score`, `encounters.voice_warning_acknowledged_by`, `encounters.voice_warning_acknowledged_at`
   - Seeded patient `Ravi Kumar / +919900001111` with one signed historical encounter and one current draft encounter
 
 - [ ] **Step 1: Write the failing persistence test**
@@ -254,6 +291,7 @@ it("maps a returning patient encounter with prior history and merge decisions", 
     signedBy: "Dr Suruchi",
     sourceType: "live"
   });
+  expect(encounter?.previousEncounters[0].secondOpinion.status).toBe("requested");
   expect(encounter?.mergeConflicts[0]).toMatchObject({
     fieldId: "medications",
     previousValue: "Clopidogrel 75 mg",
@@ -278,7 +316,13 @@ alter table public.encounters
     check (voice_match_status in ('match', 'uncertain', 'mismatch', 'unavailable')),
   add column voice_similarity_score numeric(5, 4),
   add column voice_warning_acknowledged_by uuid references auth.users(id) on delete restrict,
-  add column voice_warning_acknowledged_at timestamptz;
+  add column voice_warning_acknowledged_at timestamptz,
+  add column second_opinion_requested boolean not null default false,
+  add column second_opinion_requested_by uuid references auth.users(id) on delete restrict,
+  add column second_opinion_requested_at timestamptz,
+  add column second_opinion_status text not null default 'not_requested'
+    check (second_opinion_status in ('not_requested', 'requested', 'completed')),
+  add column second_opinion_assignee_doctor_id uuid references auth.users(id) on delete restrict;
 
 create table public.patients (
   id bigint generated always as identity primary key,
@@ -334,12 +378,14 @@ git commit -m "feat: add longitudinal PAC schema and seed data"
   - `createPatient(input: { organizationId: string; actorId: string; displayName: string; mobileNumber: string }): Promise<PatientSummary>`
   - `createEncounter(input: { organizationId: string; actorId: string; patientId: string; procedure: string; preferredLanguage: string; sourceType: "live" | "uploaded_mp4" }): Promise<Encounter>`
   - `listPreviousEncounters(input: { organizationId: string; patientId: string }): Promise<EncounterSummary[]>`
+  - `requestSecondOpinion(input: { encounterId: string; actorId: string; assigneeDoctorId: string | null }): Promise<Encounter>`
   - `acknowledgeVoiceWarning(input: { encounterId: string; actorId: string }): Promise<Encounter>`
   - HTTP routes:
     - `GET /api/patients?q=`
     - `POST /api/patients`
     - `POST /api/encounters`
     - `GET /api/patients/:id/encounters`
+    - `POST /api/encounters/:id/second-opinion`
     - `POST /api/encounters/:id/voice-warning/acknowledge`
 
 - [ ] **Step 1: Write the failing API tests**
@@ -376,6 +422,23 @@ it("requires voice-warning acknowledgement before signing a mismatch encounter",
 
   expect(response.statusCode).toBe(409);
   expect(response.json().message).toMatch(/acknowledge/i);
+});
+
+it("raises a second-opinion request on an encounter", async () => {
+  const response = await server.inject({
+    method: "POST",
+    url: "/api/encounters/2001/second-opinion",
+    headers: authHeaders,
+    payload: { assigneeDoctorId: "clinician-2" }
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({
+    secondOpinion: {
+      status: "requested",
+      assigneeDoctorId: "clinician-2"
+    }
+  });
 });
 ```
 
@@ -418,12 +481,25 @@ server.get("/api/patients", async request => {
     query: String(request.query.q ?? "")
   });
 });
+
+server.post<{
+  Params: { id: string };
+  Body: { assigneeDoctorId?: string | null };
+}>("/api/encounters/:id/second-opinion", async (request, reply) => {
+  const encounter = await store.get(request.params.id);
+  if (!encounter) return reply.code(404).send({ message: "Encounter not found." });
+  const updated = requestSecondOpinion(encounter, {
+    actorId: request.actor!.id,
+    assigneeDoctorId: request.body?.assigneeDoctorId ?? null
+  });
+  return store.save(updated);
+});
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm run test -w @vaanaya/api -- src/server.test.ts`
-Expected: PASS with patient creation, encounter creation, and acknowledgement coverage.
+Expected: PASS with patient creation, encounter creation, second-opinion, and acknowledgement coverage.
 
 - [ ] **Step 5: Commit**
 
@@ -545,7 +621,7 @@ git commit -m "feat: add PAC upload and voice match processing"
   - `GET /api/encounters/:id/history`
   - `PATCH /api/encounters/:id/merge-conflicts/:fieldId`
   - persisted `merge_decisions` rows linked to previous and current field evidence
-  - history payload with recording metadata, transcript turns, translations, timestamps, confidence, and audio seek targets
+  - history payload with recording metadata, transcript turns, translations, timestamps, confidence, second-opinion markers, and audio seek targets
 
 - [ ] **Step 1: Write the failing API tests**
 
@@ -560,7 +636,8 @@ it("returns previous conversations with replay metadata and transcript evidence"
   expect(response.statusCode).toBe(200);
   expect(response.json().previousEncounters[0]).toMatchObject({
     id: "1999",
-    recording: { sourceType: "live", mediaType: "audio/webm" }
+    recording: { sourceType: "live", mediaType: "audio/webm" },
+    secondOpinion: { status: "requested" }
   });
   expect(response.json().previousEncounters[0].transcript[0]).toMatchObject({
     speaker: "patient",
@@ -631,6 +708,7 @@ git commit -m "feat: add previous conversation review and merge persistence"
 - Create: `apps/web/src/PatientPicker.tsx`
 - Create: `apps/web/src/AddPatientDialog.tsx`
 - Create: `apps/web/src/EncounterHistoryPanel.tsx`
+- Create: `apps/web/src/SecondOpinionFilter.tsx`
 - Create: `apps/web/src/UploadRecordingForm.tsx`
 - Modify: `apps/web/src/api.ts`
 - Modify: `apps/web/src/App.tsx`
@@ -649,6 +727,7 @@ git commit -m "feat: add previous conversation review and merge persistence"
   - `createPatient(input: { displayName: string; mobileNumber: string; enrollmentAudio: Blob }): Promise<PatientSummary>`
   - `createEncounterRequest(input: { patientId: string; procedure: string; preferredLanguage: string; sourceType: "live" | "uploaded_mp4" }): Promise<Encounter>`
   - `getEncounterHistory(encounterId: string): Promise<{ previousEncounters: EncounterSummary[] }>`
+  - `requestSecondOpinion(encounterId: string, assigneeDoctorId: string | null): Promise<Encounter>`
 
 - [ ] **Step 1: Write the failing browser-level tests**
 
@@ -675,6 +754,16 @@ it("lets the clinician select a returning patient and open previous conversation
 
   expect(await screen.findByText(/Dr Suruchi/i)).toBeInTheDocument();
 });
+
+it("highlights PACs needing a second opinion and filters to my queue", async () => {
+  render(<App />);
+
+  expect(await screen.findByText(/second opinion requested/i)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: /needs my second opinion/i }));
+
+  expect(screen.getByText(/Dr Balkar/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Second opinion completed/i)).not.toBeInTheDocument();
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -688,15 +777,17 @@ Expected: FAIL because the workspace still loads only the demo encounter.
 export function PatientWorkspace() {
   const [selectedPatient, setSelectedPatient] = useState<PatientSummary | null>(null);
   const [encounter, setEncounter] = useState<Encounter | null>(null);
+  const [secondOpinionFilter, setSecondOpinionFilter] = useState<SecondOpinionFilterValue>("all");
 
   return (
     <section className="patient-workspace">
       <PatientPicker onSelect={setSelectedPatient} />
+      <SecondOpinionFilter value={secondOpinionFilter} onChange={setSecondOpinionFilter} />
       <UploadRecordingForm
         patient={selectedPatient}
         onEncounterCreated={setEncounter}
       />
-      <EncounterHistoryPanel encounter={encounter} />
+      <EncounterHistoryPanel encounter={encounter} filter={secondOpinionFilter} />
     </section>
   );
 }
@@ -705,16 +796,16 @@ export function PatientWorkspace() {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm run test -w @vaanaya/web -- src/App.test.tsx src/api.test.ts`
-Expected: PASS with patient search, history open, and upload request-shape coverage.
+Expected: PASS with patient search, second-opinion highlighting/filtering, history open, and upload request-shape coverage.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/web/src/api.ts apps/web/src/App.tsx apps/web/src/App.test.tsx apps/web/src/api.test.ts apps/web/src/PatientWorkspace.tsx apps/web/src/PatientPicker.tsx apps/web/src/AddPatientDialog.tsx apps/web/src/EncounterHistoryPanel.tsx apps/web/src/UploadRecordingForm.tsx apps/web/src/styles.css
+git add apps/web/src/api.ts apps/web/src/App.tsx apps/web/src/App.test.tsx apps/web/src/api.test.ts apps/web/src/PatientWorkspace.tsx apps/web/src/PatientPicker.tsx apps/web/src/AddPatientDialog.tsx apps/web/src/EncounterHistoryPanel.tsx apps/web/src/SecondOpinionFilter.tsx apps/web/src/UploadRecordingForm.tsx apps/web/src/styles.css
 git commit -m "feat: add longitudinal patient workspace UI"
 ```
 
-### Task 7: Build Merge Review, Warning Acknowledgement, and Scenario Verification
+### Task 7: Build Merge Review, Second-Opinion Controls, Warning Acknowledgement, and Scenario Verification
 
 **Files:**
 - Create: `apps/web/src/MergeReviewPanel.tsx`
@@ -725,10 +816,13 @@ git commit -m "feat: add longitudinal patient workspace UI"
 
 **Interfaces:**
 - Consumes:
+  - `POST /api/encounters/:id/second-opinion`
   - `PATCH /api/encounters/:id/merge-conflicts/:fieldId`
   - `POST /api/encounters/:id/voice-warning/acknowledge`
   - `POST /api/encounters/:id/sign`
 - Produces:
+  - conversation-listing highlight treatment for second-opinion PACs
+  - second-opinion filter and raise-request action
   - IDE-style conflict cards with `Use previous`, `Keep current`, `Edit merged value`
   - voice-warning banner that requires acknowledgement but does not block PAC review access
   - updated simulation output for Dr Suruchi success and Dr Balkar blocked sign-off
@@ -746,6 +840,13 @@ it("disables sign-off until the clinician resolves every merge conflict", async 
   await user.click(screen.getByRole("button", { name: /use previous/i }));
   expect(screen.getByRole("button", { name: /sign pac note/i })).toBeEnabled();
 });
+
+it("raises and highlights a second-opinion PAC from the conversation listing", async () => {
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: /ask 2nd opinion/i }));
+
+  expect(await screen.findByText(/second opinion requested/i)).toBeInTheDocument();
+});
 ```
 
 ```ts
@@ -759,7 +860,7 @@ it("keeps Dr Balkar blocked when uncertainty remains unresolved", async () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npm run test -w @vaanaya/web -- src/App.test.tsx`
-Expected: FAIL because merge cards and warning acknowledgement UI do not exist.
+Expected: FAIL because merge cards, second-opinion controls, and warning acknowledgement UI do not exist.
 
 Run: `npm run simulate:scenarios`
 Expected: FAIL or missing longitudinal scenario coverage.
@@ -792,7 +893,7 @@ await runScenario("dr-balkar-longitudinal");
 - [ ] **Step 4: Run verification**
 
 Run: `npm run test -w @vaanaya/web -- src/App.test.tsx`
-Expected: PASS with merge conflict blocking and warning acknowledgement coverage.
+Expected: PASS with merge conflict blocking, second-opinion highlighting/filtering, and warning acknowledgement coverage.
 
 Run: `npm run simulate:scenarios`
 Expected: PASS with Dr Suruchi signing successfully and Dr Balkar remaining blocked.
@@ -804,7 +905,7 @@ Expected: PASS across contracts, API, and web.
 
 ```bash
 git add apps/web/src/MergeReviewPanel.tsx apps/web/src/App.tsx apps/web/src/App.test.tsx scripts/simulate-scenarios.ts docs/qa/2026-07-26-buildathon-qa.md
-git commit -m "feat: add longitudinal merge review and scenario verification"
+git commit -m "feat: add longitudinal merge review and second-opinion workflow"
 ```
 
 ## Self-Review
@@ -815,6 +916,7 @@ git commit -m "feat: add longitudinal merge review and scenario verification"
 - Returning-patient lookup by normalized name plus mobile number is covered by Tasks 2 and 3.
 - Real voice-biometric enrollment and advisory matching are covered by Tasks 2 and 4.
 - Previous conversations with playback, transcript, translation, timestamps, and evidence links are covered by Tasks 5 and 6.
+- Second-opinion request persistence, listing highlights, and queue filters are covered by Tasks 1, 3, 5, 6, and 7.
 - IDE-style selective merge against the latest signed PAC is covered by Tasks 1, 5, and 7.
 - Immutable signed PAC history and carry-forward semantics are covered by Tasks 1, 2, 5, and 7.
 - Dr Suruchi and Dr Balkar simulations are covered by Task 7.
@@ -831,6 +933,7 @@ git commit -m "feat: add longitudinal merge review and scenario verification"
 
 - `voiceMatch.status` uses the same `match | uncertain | mismatch | unavailable` set in Tasks 1 through 7.
 - `sourceType` stays `live | uploaded_mp4` in contracts, API routes, persistence, and UI calls.
+- `secondOpinion.status` stays `not_requested | requested | completed` in contracts, API payloads, persistence, and listing filters.
 - Merge resolution options stay `use_previous | keep_current | edited` in contracts, API payloads, persistence, and UI actions.
 - The authoritative patient identity contract stays `displayName + mobileNumber` with normalized lookup in all persistence and route tasks.
 
