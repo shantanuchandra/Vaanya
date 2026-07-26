@@ -785,6 +785,7 @@ describe("encounter API", () => {
   });
 
   it("reviews and publishes an OpenAI checklist for an unknown procedure", async () => {
+    let unknownProcedureSuggestionCalls = 0;
     const server = await buildServer({
       authenticator: testAuthenticator,
       openAiPacClient: {
@@ -794,7 +795,7 @@ describe("encounter API", () => {
           checklistProposals: []
         }),
         suggestChecklistForUnknownProcedure: async () => ({
-          modelRunId: "run-unknown-1",
+          modelRunId: `run-unknown-${++unknownProcedureSuggestionCalls}`,
           suggestions: [
             {
               categoryId: "history",
@@ -848,6 +849,25 @@ describe("encounter API", () => {
       normalizedProcedure: "unlisted synthetic procedure",
       version: 1
     });
+
+    const reused = await server.inject({
+      method: "POST",
+      url: "/api/encounters",
+      headers: authorized,
+      payload: {
+        patientId: "patient-demo-sulochana",
+        procedure: "Unlisted synthetic procedure",
+        preferredLanguage: "en-IN",
+        sourceType: "uploaded_mp4"
+      }
+    });
+    expect(reused.statusCode).toBe(201);
+    expect(reused.json().checklistLibrary).toMatchObject({
+      normalizedProcedure: "unlisted synthetic procedure",
+      version: 1
+    });
+    expect(reused.json().checklistSuggestions).toEqual([]);
+    expect(unknownProcedureSuggestionCalls).toBe(1);
   });
 
   it("refuses patient-language handoff before clinician sign-off", async () => {

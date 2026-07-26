@@ -27,7 +27,12 @@ it("shows synthetic recording status and opens existing evidence review", async 
           answeredCount: 3,
           applicableCount: 4,
           criticalGapCount: 1,
-          hasTranscript: true
+          hasTranscript: true,
+          checklistLibrary: {
+            normalizedProcedure: "unlisted synthetic procedure",
+            version: 1,
+            source: "clinician_reviewed_synthetic"
+          }
         }
       ]}
       onOpen={onOpen}
@@ -37,6 +42,9 @@ it("shows synthetic recording status and opens existing evidence review", async 
 
   expect(screen.getByText("Synthetic demo data")).toBeInTheDocument();
   expect(screen.getByText("3 of 4 answered")).toBeInTheDocument();
+  expect(
+    screen.getByText("Using organization checklist v1")
+  ).toBeInTheDocument();
   await user.click(
     screen.getByRole("button", {
       name: /continue review.*shantanu chandra/i
