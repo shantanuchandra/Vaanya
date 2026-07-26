@@ -20,5 +20,10 @@ describe("recordings worklist", () => {
     expect(items.slice(0, firstProcessedIndex).map(item => item.patient.displayName))
       .toEqual(["Kavya Nair", "Ameeth Dubey"]);
     expect(items).toHaveLength(10);
+    await expect(
+      store.listRecordings({
+        organizationId: "4cbcb624-214f-4f4a-a3dc-08b41fa10000"
+      })
+    ).resolves.toHaveLength(10);
   });
 });

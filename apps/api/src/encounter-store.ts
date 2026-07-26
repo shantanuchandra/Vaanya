@@ -224,7 +224,7 @@ export class MemoryEncounterStore implements EncounterStore {
   async listRecordings(input: {
     organizationId: string;
   }): Promise<RecordingListItem[]> {
-    if (input.organizationId !== "org-1") return [];
+    void input.organizationId;
     return sortRecordingList(
       [...this.#encounters.values()].map(recordingListItem)
     );

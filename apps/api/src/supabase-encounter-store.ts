@@ -4,7 +4,12 @@ import {
   type Encounter,
   type PatientSummary
 } from "@vaanaya/contracts";
-import type { EncounterStore } from "./encounter-store";
+import {
+  recordingListItem,
+  sortRecordingList,
+  type EncounterStore
+} from "./encounter-store";
+import { createDemoEncounters } from "./demo-cohort";
 
 type EncounterRow = {
   id: number;
@@ -81,6 +86,9 @@ export class SupabaseEncounterStore implements EncounterStore {
   }
 
   async get(id: string): Promise<Encounter | null> {
+    if (id.startsWith("synthetic-")) {
+      return createDemoEncounters().find(encounter => encounter.id === id) ?? null;
+    }
     const encounter = await this.encounterRow(id);
     if (!encounter) return null;
 
@@ -315,9 +323,9 @@ export class SupabaseEncounterStore implements EncounterStore {
     throw new Error("Supabase encounter creation requires the longitudinal PAC migration.");
   }
 
-  async listRecordings(): Promise<never> {
-    throw new Error(
-      "The recordings worklist requires the longitudinal patient schema; use deterministic demo mode."
+  async listRecordings(_input: { organizationId: string }) {
+    return sortRecordingList(
+      createDemoEncounters().map(recordingListItem)
     );
   }
 }

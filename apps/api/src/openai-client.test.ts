@@ -6,6 +6,8 @@ describe("OpenAiPacClient", () => {
   it("structures PAC-aware conversation turns without fabricating transcript text", async () => {
     const parse = vi.fn().mockResolvedValue({
       output_parsed: {
+        customerSummary:
+          "Your pre-anaesthetic check-up was recorded for doctor review. Please bring your blood thinner strip because the exact name was not remembered.",
         turns: [
           {
             segmentId: "seg-1",
@@ -42,9 +44,9 @@ describe("OpenAiPacClient", () => {
       }
     ];
 
-    const turns = await client.structurePacConversation(segments);
+    const result = await client.structurePacConversation(segments);
 
-    expect(turns).toEqual([
+    expect(result.turns).toEqual([
       {
         segmentId: "seg-1",
         speakerRole: "clinician",
@@ -63,6 +65,7 @@ describe("OpenAiPacClient", () => {
     expect(JSON.stringify(request.input)).toContain(
       "synthetic pre-anesthetic check-up"
     );
-    expect(JSON.stringify(turns)).not.toContain("blood thinner");
+    expect(result.customerSummary).toContain("doctor review");
+    expect(JSON.stringify(result.turns)).not.toContain("blood thinner");
   });
 });

@@ -19,10 +19,12 @@ const PacConversationTurnSchema = z.object({
 });
 
 const PacConversationSchema = z.object({
+  customerSummary: z.string().min(1),
   turns: z.array(PacConversationTurnSchema)
 });
 
 export type PacConversationTurn = z.infer<typeof PacConversationTurnSchema>;
+export type PacConversationStructure = z.infer<typeof PacConversationSchema>;
 
 type ResponsesParser = {
   responses: {
@@ -39,14 +41,14 @@ export class OpenAiPacClient {
 
   async structurePacConversation(
     segments: DiarizedSegment[]
-  ): Promise<PacConversationTurn[]> {
+  ): Promise<PacConversationStructure> {
     const response = await this.#client.responses.parse({
       model: "gpt-5.6-sol",
       input: [
         {
           role: "system",
           content:
-            "You organize a synthetic pre-anesthetic check-up conversation for clinician-supervised documentation. Use only the supplied Sarvam diarized segment IDs and text. Do not diagnose, assign ASA grade, identify an unknown medicine, provide medication instructions, approve fasting, or infer clinical facts not stated. Speaker role can be unknown."
+            "You organize a synthetic pre-anesthetic check-up conversation for clinician-supervised documentation and draft a simple customer-facing summary. Use only the supplied Sarvam diarized segment IDs and text. Do not diagnose, assign ASA grade, identify an unknown medicine, provide medication instructions, approve fasting, or infer clinical facts not stated. Speaker role can be unknown. The customerSummary must be simple, non-alarming, and explicitly say the note is for doctor review."
         },
         {
           role: "user",
@@ -68,6 +70,9 @@ export class OpenAiPacClient {
     });
     const parsed = PacConversationSchema.parse(response.output_parsed);
     const segmentIds = new Set(segments.map(segment => segment.id));
-    return parsed.turns.filter(turn => segmentIds.has(turn.segmentId));
+    return {
+      ...parsed,
+      turns: parsed.turns.filter(turn => segmentIds.has(turn.segmentId))
+    };
   }
 }
