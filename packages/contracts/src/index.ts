@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./checklist";
+
 export const EncounterStateSchema = z.enum([
   "created",
   "consented",
