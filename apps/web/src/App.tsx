@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import AudioPlayer from "react-h5-audio-player";
+import "react-h5-audio-player/lib/styles.css";
 import {
   ArrowRight,
   CircleAlert,
@@ -619,12 +621,15 @@ function App() {
                 <span>{selectedRecordingFile.name}</span>
               ) : null}
               {selectedRecordingPreviewUrl ? (
-                <audio
-                  aria-label="Preview selected conversation audio"
-                  className="selected-recording-preview"
-                  controls
-                  src={selectedRecordingPreviewUrl}
-                />
+                <div className="selected-recording-preview">
+                  <AudioPlayer
+                    src={selectedRecordingPreviewUrl}
+                    showJumpControls={false}
+                    customAdditionalControls={[]}
+                    customVolumeControls={[]}
+                    layout="horizontal"
+                  />
+                </div>
               ) : null}
             </label>
             <button

@@ -73,7 +73,7 @@ describe("PAC review workspace", () => {
       }))
     );
 
-    render(<App />);
+    const { container } = render(<App />);
 
     const input = await screen.findByLabelText(/conversation recording file/i);
     const firstFile = new File(["first audio"], "first-pac.mp3", {
@@ -82,7 +82,7 @@ describe("PAC review workspace", () => {
 
     await user.upload(input, firstFile);
 
-    const preview = screen.getByLabelText("Preview selected conversation audio");
+    const preview = container.querySelector(".selected-recording-preview audio");
     expect(preview).toHaveAttribute("src", "blob:preview-first-pac.mp3");
     expect(screen.getByText("first-pac.mp3")).toBeInTheDocument();
     expect(
@@ -95,7 +95,7 @@ describe("PAC review workspace", () => {
     await user.upload(input, secondFile);
 
     expect(
-      screen.getByLabelText("Preview selected conversation audio")
+      container.querySelector(".selected-recording-preview audio")
     ).toHaveAttribute("src", "blob:preview-second-pac.wav");
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-first-pac.mp3");
   });
