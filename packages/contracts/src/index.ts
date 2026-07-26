@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+  CHECKLIST_TEMPLATE_ID,
+  CHECKLIST_VERSION,
+  ChecklistContextSchema,
+  EvaluatedChecklistSchema,
+  SYNTHETIC_PAC_TEMPLATE,
+  checklistBlockers,
+  evaluateChecklist
+} from "./checklist";
 
 export * from "./checklist";
 
@@ -35,14 +44,27 @@ export const TranscriptTurnSchema = z.object({
 });
 export type TranscriptTurn = z.infer<typeof TranscriptTurnSchema>;
 
-export const FieldProposalSchema = z.object({
-  id: z.string().min(1),
-  label: z.string().min(1),
-  state: FieldStateSchema,
-  value: z.string(),
-  sourceTurnIds: z.array(z.string()).min(1),
-  required: z.boolean()
-});
+export const FieldProposalSchema = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    state: FieldStateSchema,
+    value: z.string(),
+    sourceTurnIds: z.array(z.string()),
+    required: z.boolean()
+  })
+  .superRefine((proposal, context) => {
+    if (
+      ["captured", "uncertain"].includes(proposal.state) &&
+      proposal.sourceTurnIds.length === 0
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sourceTurnIds"],
+        message: "Captured and uncertain proposals require source evidence."
+      });
+    }
+  });
 
 export const PatientSummarySchema = z.object({
   id: z.string().min(1),
@@ -112,6 +134,12 @@ export const EncounterSchema = z.object({
   secondOpinionRequestedBy: z.string().min(1).optional(),
   secondOpinionRequestedAt: z.string().datetime().optional(),
   recommendationQuestions: z.array(RecommendationQuestionSchema).optional(),
+  checklistContext: ChecklistContextSchema.default({
+    templateId: CHECKLIST_TEMPLATE_ID,
+    version: CHECKLIST_VERSION,
+    contextFlags: []
+  }),
+  checklist: EvaluatedChecklistSchema.optional(),
   requiredFieldIds: z.array(z.string()),
   proposals: z.array(FieldProposalSchema),
   transcript: z.array(TranscriptTurnSchema),
@@ -119,6 +147,19 @@ export const EncounterSchema = z.object({
 });
 
 export type Encounter = z.infer<typeof EncounterSchema>;
+
+export function withEvaluatedChecklist(encounterInput: Encounter): Encounter {
+  const encounter = EncounterSchema.parse(encounterInput);
+  return EncounterSchema.parse({
+    ...encounter,
+    checklist: evaluateChecklist({
+      procedure: encounter.procedure,
+      contextFlags: encounter.checklistContext.contextFlags,
+      proposals: encounter.proposals,
+      transcript: encounter.transcript
+    })
+  });
+}
 
 const TRANSITIONS: Readonly<Record<EncounterState, readonly EncounterState[]>> = {
   created: ["consented"],
@@ -165,7 +206,7 @@ export function resolveProposal(
   if (!proposal) throw new Error(`Unknown proposal: ${command.proposalId}`);
   if (!command.value.trim()) throw new Error("Resolved value cannot be empty.");
 
-  return EncounterSchema.parse({
+  return withEvaluatedChecklist({
     ...encounter,
     proposals: encounter.proposals.map(item =>
       item.id === command.proposalId
@@ -186,6 +227,97 @@ export function resolveProposal(
   });
 }
 
+export function enterChecklistItem(
+  encounterInput: Encounter,
+  command: {
+    itemId: string;
+    value: string;
+    actorId: string;
+  }
+): Encounter {
+  const encounter = EncounterSchema.parse(encounterInput);
+  if (encounter.state !== "clinician_review")
+    throw new Error("Checklist items can only be entered during clinician review.");
+  if (!command.value.trim()) throw new Error("Checklist value cannot be empty.");
+  const definition = SYNTHETIC_PAC_TEMPLATE.items.find(
+    current => current.id === command.itemId
+  );
+  if (!definition) throw new Error(`Unknown checklist item: ${command.itemId}`);
+  const evaluated = withEvaluatedChecklist(encounter).checklist!;
+  const current = evaluated.items.find(item => item.id === command.itemId);
+  if (!current?.applicable)
+    throw new Error(`Checklist item is not applicable: ${command.itemId}`);
+
+  const proposal = {
+    id: definition.id,
+    label: definition.label,
+    state: "clinician_entered" as const,
+    value: command.value.trim(),
+    sourceTurnIds: [] as string[],
+    required: definition.required
+  };
+  return withEvaluatedChecklist({
+    ...encounter,
+    proposals: [
+      ...encounter.proposals.filter(item => item.id !== command.itemId),
+      proposal
+    ],
+    audit: [
+      ...encounter.audit,
+      auditEvent("checklist.item_entered", command.actorId, {
+        itemId: command.itemId
+      })
+    ]
+  });
+}
+
+export function deferChecklistItem(
+  encounterInput: Encounter,
+  command: {
+    itemId: string;
+    reason: string;
+    actorId: string;
+  }
+): Encounter {
+  const encounter = EncounterSchema.parse(encounterInput);
+  if (encounter.state !== "clinician_review")
+    throw new Error("Checklist items can only be deferred during clinician review.");
+  if (!command.reason.trim()) throw new Error("A deferral reason is required.");
+  const definition = SYNTHETIC_PAC_TEMPLATE.items.find(
+    current => current.id === command.itemId
+  );
+  if (!definition) throw new Error(`Unknown checklist item: ${command.itemId}`);
+  if (!definition.deferrable)
+    throw new Error(`${definition.label} cannot be deferred.`);
+  const current = withEvaluatedChecklist(encounter).checklist?.items.find(
+    item => item.id === command.itemId
+  );
+  if (!current?.applicable)
+    throw new Error(`Checklist item is not applicable: ${command.itemId}`);
+
+  return withEvaluatedChecklist({
+    ...encounter,
+    proposals: [
+      ...encounter.proposals.filter(item => item.id !== command.itemId),
+      {
+        id: definition.id,
+        label: definition.label,
+        state: "intentionally_skipped",
+        value: command.reason.trim(),
+        sourceTurnIds: [],
+        required: definition.required
+      }
+    ],
+    audit: [
+      ...encounter.audit,
+      auditEvent("checklist.item_deferred", command.actorId, {
+        itemId: command.itemId,
+        reason: command.reason.trim()
+      })
+    ]
+  });
+}
+
 export function signEncounter(
   encounterInput: Encounter,
   command: {
@@ -193,7 +325,7 @@ export function signEncounter(
     actorRole: "clinician" | "coordinator";
   }
 ): Encounter {
-  const encounter = EncounterSchema.parse(encounterInput);
+  const encounter = withEvaluatedChecklist(encounterInput);
   if (command.actorRole !== "clinician") {
     throw new Error("Only a clinician can sign a PAC note.");
   }
@@ -201,27 +333,25 @@ export function signEncounter(
     throw new Error(`Encounter cannot be signed from state ${encounter.state}.`);
   }
 
-  const unresolved = encounter.proposals.filter(
-    proposal =>
-      encounter.requiredFieldIds.includes(proposal.id) &&
-      ["uncertain", "missing"].includes(proposal.state)
-  );
+  const unresolved = checklistBlockers(encounter.checklist!);
   if (unresolved.length) {
     throw new Error(
       `Resolve required fields before signing: ${unresolved
-        .map(proposal => proposal.label)
+        .map(item => item.label)
         .join(", ")}`
     );
   }
 
-  return EncounterSchema.parse({
+  return withEvaluatedChecklist({
     ...encounter,
     state: "signed",
     audit: [
       ...encounter.audit,
       auditEvent("encounter.signed", command.actorId, {
         version: 1,
-        proposalCount: encounter.proposals.length
+        proposalCount: encounter.proposals.length,
+        checklistTemplateId: encounter.checklist?.templateId,
+        checklistVersion: encounter.checklist?.version
       })
     ]
   });
