@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  checklistContextFromRow,
   normalizeDatabaseTimestamp,
   proposalRowsToInsert,
   sourceRowsToInsert,
@@ -8,6 +9,20 @@ import {
 } from "./supabase-encounter-store";
 
 describe("Supabase encounter mapping", () => {
+  it("maps persisted checklist context into the versioned contract", () => {
+    expect(
+      checklistContextFromRow({
+        checklist_template_id: "synthetic-pac",
+        checklist_version: "synthetic-pac-v1",
+        checklist_context_flags: ["pregnancy_question_applicable"]
+      })
+    ).toEqual({
+      templateId: "synthetic-pac",
+      version: "synthetic-pac-v1",
+      contextFlags: ["pregnancy_question_applicable"]
+    });
+  });
+
   it("normalizes Postgres offset timestamps to contract ISO datetimes", () => {
     expect(normalizeDatabaseTimestamp("2026-07-26T06:15:00+00:00")).toBe(
       "2026-07-26T06:15:00.000Z"

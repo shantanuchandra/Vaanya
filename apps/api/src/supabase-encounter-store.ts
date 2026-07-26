@@ -1,6 +1,9 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
+  ChecklistContextSchema,
+  ChecklistLibraryVersionSchema,
   EncounterSchema,
+  withEvaluatedChecklist,
   type Encounter,
   type PatientSummary
 } from "@vaanaya/contracts";
@@ -12,12 +15,31 @@ import { createDemoEncounters } from "./demo-cohort";
 
 type EncounterRow = {
   id: number;
+  organization_id: string;
   patient_reference: string;
   procedure_name: string;
   preferred_language: string;
   state: Encounter["state"];
   assigned_clinician_id: string | null;
+  checklist_template_id: string;
+  checklist_version: string;
+  checklist_context_flags: unknown;
+  checklist_library_procedure: string | null;
+  checklist_library_version: number | null;
+  checklist_library_source: "clinician_reviewed_synthetic" | null;
 };
+
+export function checklistContextFromRow(input: {
+  checklist_template_id: string;
+  checklist_version: string;
+  checklist_context_flags: unknown;
+}) {
+  return ChecklistContextSchema.parse({
+    templateId: input.checklist_template_id,
+    version: input.checklist_version,
+    contextFlags: input.checklist_context_flags
+  });
+}
 
 export function normalizeDatabaseTimestamp(value: string): string {
   return new Date(value).toISOString();
@@ -114,7 +136,7 @@ export class SupabaseEncounterStore implements EncounterStore {
     let query = this.client
       .from("encounters")
       .select(
-        "id,patient_reference,procedure_name,preferred_language,state,assigned_clinician_id"
+        "id,organization_id,patient_reference,procedure_name,preferred_language,state,assigned_clinician_id,checklist_template_id,checklist_version,checklist_context_flags,checklist_library_procedure,checklist_library_version,checklist_library_source"
       );
     query =
       id === "demo"
@@ -132,8 +154,13 @@ export class SupabaseEncounterStore implements EncounterStore {
     const encounter = await this.encounterRow(id);
     if (!encounter) return null;
 
-    const [transcriptResult, proposalsResult, consentResult, auditResult] =
-      await Promise.all([
+    const [
+      transcriptResult,
+      proposalsResult,
+      consentResult,
+      auditResult,
+      suggestionsResult
+    ] = await Promise.all([
         this.client
           .from("transcript_segments")
           .select(
@@ -159,14 +186,22 @@ export class SupabaseEncounterStore implements EncounterStore {
           .from("audit_events")
           .select("id,action,actor_id,detail,occurred_at")
           .eq("encounter_id", encounter.id)
-          .order("occurred_at")
+          .order("occurred_at"),
+        this.client
+          .from("pac_checklist_suggestions")
+          .select(
+            "id,model_run_id,procedure_name,category_id,question,rationale,approval_state,decided_by,decided_at"
+          )
+          .eq("encounter_id", encounter.id)
+          .order("created_at")
       ]);
 
     for (const [label, result] of [
       ["transcript", transcriptResult],
       ["proposals", proposalsResult],
       ["consent", consentResult],
-      ["audit", auditResult]
+      ["audit", auditResult],
+      ["suggestions", suggestionsResult]
     ] as const) {
       if (result.error)
         throw new Error(`Supabase ${label} read failed: ${result.error.message}`);
@@ -199,13 +234,58 @@ export class SupabaseEncounterStore implements EncounterStore {
       )
       .at(-1)?.customerSummary;
 
-    return EncounterSchema.parse({
+    return withEvaluatedChecklist(EncounterSchema.parse({
       id: id === "demo" ? "demo" : String(encounter.id),
       patientReference: encounter.patient_reference,
       procedure: encounter.procedure_name,
       preferredLanguage: encounter.preferred_language,
       state: encounter.state,
       consentRecorded: Boolean(consentResult.data?.length),
+      checklistContext: checklistContextFromRow(encounter),
+      ...(encounter.checklist_library_procedure &&
+      encounter.checklist_library_version &&
+      encounter.checklist_library_source
+        ? {
+            checklistLibrary: {
+              normalizedProcedure: encounter.checklist_library_procedure,
+              version: encounter.checklist_library_version,
+              source: encounter.checklist_library_source
+            }
+          }
+        : {}),
+      checklistSuggestions: (suggestionsResult.data ?? []).map(suggestion => ({
+        id: suggestion.id,
+        procedure: suggestion.procedure_name,
+        modelRunId: suggestion.model_run_id,
+        categoryId: suggestion.category_id,
+        question: suggestion.question,
+        rationale: suggestion.rationale,
+        required: false,
+        severity: "standard",
+        authority: "evidence_or_clinician",
+        deferrable: true,
+        approvalState: suggestion.approval_state,
+        ...(suggestion.decided_by
+          ? { decidedBy: suggestion.decided_by }
+          : {}),
+        ...(suggestion.decided_at
+          ? { decidedAt: normalizeDatabaseTimestamp(suggestion.decided_at) }
+          : {})
+      })),
+      checklistExtensions: (suggestionsResult.data ?? [])
+        .filter(suggestion => suggestion.approval_state === "approved")
+        .map(suggestion => ({
+          id: suggestion.id,
+          categoryId: suggestion.category_id,
+          label: suggestion.question,
+          question: suggestion.question,
+          rationale: suggestion.rationale,
+          required: false,
+          authority: "evidence_or_clinician",
+          severity: "standard",
+          deferrable: true,
+          applicability: { kind: "always" }
+        })),
       customerSummary,
       requiredFieldIds: (proposalsResult.data ?? [])
         .filter(proposal => proposal.required)
@@ -228,7 +308,7 @@ export class SupabaseEncounterStore implements EncounterStore {
         occurredAt: normalizeDatabaseTimestamp(event.occurred_at),
         detail: event.detail
       }))
-    });
+    }));
   }
 
   async save(encounter: Encounter): Promise<Encounter> {
@@ -378,11 +458,53 @@ export class SupabaseEncounterStore implements EncounterStore {
         throw new Error(`Supabase proposal source write failed: ${error.message}`);
     }
 
-    if (row.state !== encounter.state) {
+    if (encounter.checklistSuggestions.length) {
+      const { error } = await this.client
+        .from("pac_checklist_suggestions")
+        .upsert(
+          encounter.checklistSuggestions.map(suggestion => ({
+            id: suggestion.id,
+            encounter_id: row.id,
+            model_run_id: suggestion.modelRunId,
+            procedure_name: suggestion.procedure,
+            category_id: suggestion.categoryId,
+            question: suggestion.question,
+            rationale: suggestion.rationale,
+            approval_state: suggestion.approvalState,
+            decided_by: suggestion.decidedBy ?? null,
+            decided_at: suggestion.decidedAt ?? null
+          })),
+          { onConflict: "id" }
+        );
+      if (error)
+        throw new Error(`Supabase checklist suggestion write failed: ${error.message}`);
+    }
+
+    const checklistContextChanged =
+      row.checklist_template_id !== encounter.checklistContext.templateId ||
+      row.checklist_version !== encounter.checklistContext.version ||
+      JSON.stringify(row.checklist_context_flags) !==
+        JSON.stringify(encounter.checklistContext.contextFlags) ||
+      row.checklist_library_procedure !==
+        (encounter.checklistLibrary?.normalizedProcedure ?? null) ||
+      row.checklist_library_version !==
+        (encounter.checklistLibrary?.version ?? null) ||
+      row.checklist_library_source !==
+        (encounter.checklistLibrary?.source ?? null);
+    if (row.state !== encounter.state || checklistContextChanged) {
       const { error } = await this.client
         .from("encounters")
         .update({
           state: encounter.state,
+          checklist_template_id: encounter.checklistContext.templateId,
+          checklist_version: encounter.checklistContext.version,
+          checklist_context_flags: encounter.checklistContext.contextFlags,
+          checklist_library_procedure:
+            encounter.checklistLibrary?.normalizedProcedure ?? null,
+          checklist_library_version:
+            encounter.checklistLibrary?.version ?? null,
+          checklist_library_source:
+            encounter.checklistLibrary?.source ?? null,
           updated_at: new Date().toISOString()
         })
         .eq("id", row.id);
@@ -444,7 +566,29 @@ export class SupabaseEncounterStore implements EncounterStore {
     organizationId: string;
     normalizedProcedure: string;
   }) {
-    return this.#demoStore.findChecklistLibraryVersion(input);
+    if (input.organizationId === "org-1")
+      return this.#demoStore.findChecklistLibraryVersion(input);
+    const { data, error } = await this.client
+      .from("pac_checklist_library_versions")
+      .select(
+        "organization_id,normalized_procedure,version,source,content,published_by"
+      )
+      .eq("organization_id", input.organizationId)
+      .eq("normalized_procedure", input.normalizedProcedure)
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error)
+      throw new Error(`Supabase checklist library read failed: ${error.message}`);
+    if (!data) return null;
+    return ChecklistLibraryVersionSchema.parse({
+      organizationId: data.organization_id,
+      normalizedProcedure: data.normalized_procedure,
+      version: data.version,
+      source: data.source,
+      publishedBy: data.published_by,
+      items: data.content.items
+    });
   }
 
   async publishChecklistLibraryVersion(
@@ -452,6 +596,20 @@ export class SupabaseEncounterStore implements EncounterStore {
       MemoryEncounterStore["publishChecklistLibraryVersion"]
     >[0]
   ) {
-    return this.#demoStore.publishChecklistLibraryVersion(version);
+    if (version.organizationId === "org-1")
+      return this.#demoStore.publishChecklistLibraryVersion(version);
+    const { error } = await this.client
+      .from("pac_checklist_library_versions")
+      .insert({
+        organization_id: version.organizationId,
+        normalized_procedure: version.normalizedProcedure,
+        version: version.version,
+        source: version.source,
+        content: { items: version.items },
+        published_by: version.publishedBy
+      });
+    if (error)
+      throw new Error(`Supabase checklist library write failed: ${error.message}`);
+    return version;
   }
 }
