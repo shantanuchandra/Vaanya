@@ -7,20 +7,27 @@ import {
   Languages,
   Link2,
   Mic2,
+  Radio,
   ShieldCheck,
   Sparkles,
   Volume2,
-  Printer
+  Printer,
+  Search
 } from "lucide-react";
 import type {
   Encounter,
   FieldState,
+  PatientSummary,
   TranscriptTurn
 } from "@vaanaya/contracts";
 import {
+  createEncounterRequest,
+  processCompleteExampleRecording,
   createKannadaHandoff,
   getEncounter,
+  requestSecondOpinion,
   resolveField,
+  searchPatients,
   signEncounterRequest,
   type KannadaHandoff
 } from "./api";
@@ -66,11 +73,21 @@ function EvidenceTurn({
 
 function App() {
   const [encounter, setEncounter] = useState<Encounter | null>(null);
+  const [patientQuery, setPatientQuery] = useState("");
+  const [patients, setPatients] = useState<PatientSummary[]>([]);
+  const [selectedPatient, setSelectedPatient] = useState<PatientSummary | null>(
+    null
+  );
+  const [procedure, setProcedure] = useState("Elective abdominal procedure");
   const [selectedField, setSelectedField] = useState<string | null>(null);
   const [resolution, setResolution] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recordingAction, setRecordingAction] = useState<"complete" | null>(null);
   const [handoff, setHandoff] = useState<KannadaHandoff | null>(null);
+  const [conversationFilter, setConversationFilter] = useState<
+    "all" | "second-opinion"
+  >("all");
 
   useEffect(() => {
     let active = true;
@@ -91,6 +108,31 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const encounterPatient = encounter?.patient;
+    const fallbackPatient =
+      encounterPatient && patientMatchesQuery(encounterPatient, patientQuery)
+        ? [encounterPatient]
+        : [];
+    searchPatients(patientQuery)
+      .then(results => {
+        if (active) setPatients(results.length ? results : fallbackPatient);
+      })
+      .catch(() => {
+        if (active) setPatients(fallbackPatient);
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    encounter?.patient?.displayName,
+    encounter?.patient?.id,
+    encounter?.patient?.mobileLast4,
+    encounter?.patient?.mobileNumber,
+    patientQuery
+  ]);
+
   const selectedProposal = encounter?.proposals.find(
     proposal => proposal.id === selectedField
   );
@@ -104,6 +146,19 @@ function App() {
         proposal.required &&
         ["uncertain", "missing"].includes(proposal.state)
     ) ?? [];
+  const conversations = encounter ? [encounter] : [];
+  const visibleConversations = conversations.filter(conversation =>
+    conversationFilter === "second-opinion"
+      ? conversation.secondOpinionRequested
+      : true
+  );
+  const hasSyntheticProcessedRecording = Boolean(
+    encounter?.audit.some(
+      event =>
+        event.action === "recording.synthetic_processed" &&
+        event.detail.syntheticDemo === true
+    )
+  );
 
   async function confirmSelectedField() {
     if (!encounter || !selectedProposal || !resolution.trim()) return;
@@ -155,6 +210,59 @@ function App() {
     }
   }
 
+  async function uploadCompleteSyntheticRecording() {
+    if (!selectedPatient) return;
+    setBusy(true);
+    setRecordingAction("complete");
+    setNotice(null);
+    try {
+      const draft =
+        encounter?.patient?.id === selectedPatient.id
+          ? encounter
+          : await createEncounterRequest({
+              patientId: selectedPatient.id,
+              procedure: procedure.trim(),
+              preferredLanguage: encounter?.preferredLanguage ?? "hi-IN",
+              sourceType: "uploaded_mp4"
+            });
+      const extracted = await processCompleteExampleRecording(draft.id);
+      setEncounter(extracted.encounter);
+      setSelectedField(extracted.encounter.proposals.at(-1)?.id ?? null);
+      setNotice(
+        "Complete synthetic recording processed with Sarvam diarization and OpenAI PAC structuring."
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Complete synthetic recording upload failed."
+      );
+    } finally {
+      setBusy(false);
+      setRecordingAction(null);
+    }
+  }
+
+  async function raiseSecondOpinion() {
+    if (!encounter) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await requestSecondOpinion(encounter.id);
+      setEncounter(updated);
+      setConversationFilter("second-opinion");
+      setNotice("2nd opinion requested. This PAC is now highlighted in listings.");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Second opinion could not be requested."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!encounter) {
     return (
       <main className="loading-shell">
@@ -187,6 +295,130 @@ function App() {
       </header>
 
       <main>
+        <section className="patient-workflow" aria-label="Patient PAC workflow">
+          <div className="patient-search">
+            <label>
+              Find patient
+              <span>
+                <Search size={15} />
+                <input
+                  value={patientQuery}
+                  onChange={event => setPatientQuery(event.target.value)}
+                  placeholder="Name or mobile number"
+                />
+              </span>
+            </label>
+            <div className="patient-results" aria-label="Patient results">
+              {patients.map(patient => (
+                <button
+                  key={patient.id}
+                  className={
+                    selectedPatient?.id === patient.id
+                      ? "patient-result is-selected"
+                      : "patient-result"
+                  }
+                  type="button"
+                  onClick={() => setSelectedPatient(patient)}
+                >
+                  <strong>{patient.displayName}</strong>
+                  <small>mobile ending {patient.mobileLast4}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="recording-actions">
+            <label>
+              Procedure
+              <input
+                value={procedure}
+                onChange={event => setProcedure(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={uploadCompleteSyntheticRecording}
+              disabled={!selectedPatient || !procedure.trim() || busy}
+            >
+              <Radio size={16} />
+              {recordingAction === "complete"
+                ? "Diarizing and translating with Sarvam..."
+                : "Upload complete synthetic recording"}
+            </button>
+          </div>
+          {encounter.recommendationQuestions?.length ? (
+            <div className="recommendation-questions">
+              <span className="section-label">Next questions</span>
+              {encounter.recommendationQuestions.map(question => (
+                <article key={question.id}>
+                  <strong>{question.question}</strong>
+                  <small>{question.reason}</small>
+                </article>
+              ))}
+            </div>
+          ) : null}
+          <div className="second-opinion-actions">
+            <button
+              type="button"
+              onClick={raiseSecondOpinion}
+              disabled={busy || encounter.secondOpinionRequested}
+            >
+              <CircleAlert size={16} />
+              {encounter.secondOpinionRequested
+                ? "2nd opinion requested"
+                : "Ask for 2nd opinion"}
+            </button>
+          </div>
+        </section>
+
+        <section className="conversation-listing" aria-label="PAC conversation listings">
+          <div className="listing-header">
+            <div>
+              <span className="section-label">Conversation listings</span>
+              <h2>PAC conversations</h2>
+            </div>
+            <div className="listing-filters" aria-label="Conversation filters">
+              <button
+                type="button"
+                className={conversationFilter === "all" ? "is-active" : ""}
+                onClick={() => setConversationFilter("all")}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                className={
+                  conversationFilter === "second-opinion" ? "is-active" : ""
+                }
+                onClick={() => setConversationFilter("second-opinion")}
+              >
+                Needs 2nd opinion
+              </button>
+            </div>
+          </div>
+          <div className="conversation-cards">
+            {visibleConversations.map(conversation => (
+              <article
+                key={conversation.id}
+                className={
+                  conversation.secondOpinionRequested
+                    ? "conversation-card needs-second-opinion"
+                    : "conversation-card"
+                }
+              >
+                <div>
+                  <strong>{conversation.patient?.displayName ?? conversation.patientReference}</strong>
+                  <small>{conversation.procedure}</small>
+                </div>
+                {conversation.secondOpinionRequested ? (
+                  <span className="second-opinion-badge">2nd opinion raised</span>
+                ) : (
+                  <span className="conversation-status">Standard review</span>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+
         <section className="case-header">
           <div>
             <div className="eyebrow">PAC / {encounter.patientReference}</div>
@@ -198,7 +430,7 @@ function App() {
           </div>
           <dl className="case-facts">
             <div>
-              <dt>Procedure</dt>
+              <dt>Clinician-selected procedure</dt>
               <dd>{encounter.procedure}</dd>
             </div>
             <div>
@@ -218,6 +450,11 @@ function App() {
               <div>
                 <span className="section-label">Evidence rail</span>
                 <h2>What was said</h2>
+                {hasSyntheticProcessedRecording ? (
+                  <p className="synthetic-evidence-note">
+                    Synthetic demo recording - clinician review required
+                  </p>
+                ) : null}
               </div>
               <span className="recording-pill"><Mic2 size={13} /> 01:16</span>
             </div>
@@ -240,6 +477,11 @@ function App() {
                 />
               ))}
             </div>
+            {hasSyntheticProcessedRecording ? (
+              <div className="provider-evidence-label">
+                Sarvam translated evidence
+              </div>
+            ) : null}
           </aside>
 
           <section className="pac-sheet" aria-label="PAC draft">
@@ -406,6 +648,16 @@ function App() {
         </section>
       </main>
     </div>
+  );
+}
+
+function patientMatchesQuery(patient: PatientSummary, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return (
+    patient.displayName.toLowerCase().includes(normalizedQuery) ||
+    patient.mobileNumber.includes(normalizedQuery) ||
+    patient.mobileLast4.includes(normalizedQuery)
   );
 }
 

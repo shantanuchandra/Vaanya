@@ -1,4 +1,9 @@
-import { EncounterSchema, type Encounter } from "@vaanaya/contracts";
+import {
+  EncounterSchema,
+  PatientSummarySchema,
+  type Encounter,
+  type PatientSummary
+} from "@vaanaya/contracts";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 type AccessTokenProvider = () => Promise<string | null>;
@@ -28,6 +33,82 @@ export type TranscriptionResult = {
   languageCode: string | null;
   languageProbability: number | null;
 };
+
+export async function searchPatients(query: string): Promise<PatientSummary[]> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/patients?q=${encodeURIComponent(query)}`
+  );
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Patients could not be loaded.");
+  if (!Array.isArray(payload)) return [];
+  return payload.map(item => PatientSummarySchema.parse(item));
+}
+
+export async function createPatient(input: {
+  displayName: string;
+  mobileNumber: string;
+}): Promise<PatientSummary> {
+  const response = await protectedFetch(`${API_BASE}/api/patients`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Patient could not be created.");
+  return PatientSummarySchema.parse(payload);
+}
+
+export async function createEncounterRequest(input: {
+  patientId: string;
+  procedure: string;
+  preferredLanguage: string;
+  sourceType: "live" | "uploaded_mp4";
+}): Promise<Encounter> {
+  const response = await protectedFetch(`${API_BASE}/api/encounters`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Encounter could not be created.");
+  return EncounterSchema.parse(payload);
+}
+
+export async function processMockRecording(
+  encounterId: string,
+  input: {
+    sourceType: "live" | "uploaded_mp4";
+    transcript: string;
+    procedure?: string;
+  }
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/mock-recording`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input)
+    }
+  );
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Recording could not populate the PAC.");
+  return EncounterSchema.parse(payload);
+}
+
+export async function requestSecondOpinion(
+  encounterId: string
+): Promise<Encounter> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/second-opinion`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" }
+    }
+  );
+  const payload: unknown = await response.json();
+  if (!response.ok) throw new Error("Second opinion could not be requested.");
+  return EncounterSchema.parse(payload);
+}
 
 export async function transcribeAudio(
   audio: Blob,
@@ -104,6 +185,62 @@ export async function transcribeEncounterSpeech(
   return {
     transcription: payload.transcription,
     suggestions: payload.suggestions,
+    encounter: EncounterSchema.parse(payload.encounter)
+  };
+}
+
+export async function transcribeExampleRecording(
+  encounterId: string,
+  languageCode: "unknown" | "hi-IN" | "kn-IN" | "en-IN" = "hi-IN"
+): Promise<{
+  transcription: TranscriptionResult;
+  suggestions: Array<{
+    field: string;
+    state: "captured" | "uncertain" | "missing";
+    value: string;
+    sourceTurnIds: string[];
+  }>;
+  encounter: Encounter;
+}> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/example-recording?languageCode=${languageCode}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" }
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok)
+    throw new Error(
+      payload.message ?? "Example recording could not be converted into evidence."
+    );
+  return {
+    transcription: payload.transcription,
+    suggestions: payload.suggestions,
+    encounter: EncounterSchema.parse(payload.encounter)
+  };
+}
+
+export async function processCompleteExampleRecording(
+  encounterId: string
+): Promise<{
+  status: "completed";
+  encounter: Encounter;
+}> {
+  const response = await protectedFetch(
+    `${API_BASE}/api/encounters/${encounterId}/complete-example-recording`,
+    {
+      method: "POST"
+    }
+  );
+  const payload = await response.json();
+  if (!response.ok)
+    throw new Error(
+      payload.message ??
+        "Complete synthetic recording could not be converted into evidence."
+    );
+  return {
+    status: "completed",
     encounter: EncounterSchema.parse(payload.encounter)
   };
 }

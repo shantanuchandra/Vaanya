@@ -161,6 +161,8 @@ button:focus-visible, textarea:focus-visible, a:focus-visible {
 .review-case-heading > div > span { font: 9px var(--mono); color: var(--green); text-transform: uppercase; }
 .review-case-heading h2 { margin: 7px 0 0; font: 520 clamp(25px, 3vw, 36px) var(--display); }
 .synthetic-tag { border: 1px solid #aabbb1; color: var(--green); padding: 6px 9px; font: 8px var(--mono); text-transform: uppercase; }
+.synthetic-evidence-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.provider-evidence-label { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font: 10px var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
 .evidence-stitch { padding: 18px clamp(22px, 4vw, 46px) 36px; }
 .evidence-stitch > section {
   display: grid;
@@ -727,11 +729,210 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   background: var(--green);
   color: white;
 }
+.patient-workflow {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.1fr) minmax(260px, 0.8fr) minmax(280px, 1fr);
+  gap: 14px;
+  margin: 24px 0 18px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper) 92%, white);
+  box-shadow: 0 16px 40px rgba(17, 24, 39, 0.07);
+}
+.patient-search label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 720;
+}
+.patient-search label > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--rule);
+  background: white;
+}
+.patient-search input {
+  width: 100%;
+  min-height: 38px;
+  border: 0;
+  outline: 0;
+  font: inherit;
+}
+.patient-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.patient-result {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+  padding: 9px 11px;
+  border: 1px solid var(--rule);
+  background: white;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.patient-result.is-selected {
+  border-color: var(--green);
+  box-shadow: inset 3px 0 0 var(--green);
+}
+.patient-result small,
+.recommendation-questions small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.recording-actions {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+.recording-actions label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 720;
+}
+.recording-actions input {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--rule);
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  outline: 0;
+}
+.recording-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 0;
+  background: var(--ink);
+  color: white;
+  font-weight: 760;
+  cursor: pointer;
+}
+.recording-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.second-opinion-actions {
+  display: flex;
+  align-items: end;
+}
+.second-opinion-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  width: 100%;
+  border: 1px solid #f4b84f;
+  background: #fff7e6;
+  color: #7a4a00;
+  font-weight: 760;
+  cursor: pointer;
+}
+.second-opinion-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.recommendation-questions {
+  display: grid;
+  gap: 8px;
+}
+.recommendation-questions article {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--amber);
+  background: white;
+}
+.conversation-listing {
+  margin: 0 0 18px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  background: white;
+}
+.listing-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+}
+.listing-header h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+}
+.listing-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.listing-filters button {
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.listing-filters button.is-active {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.conversation-cards {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+.conversation-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+}
+.conversation-card.needs-second-opinion {
+  border-color: #f4b84f;
+  background: #fff8ea;
+  box-shadow: inset 4px 0 0 #f4b84f;
+}
+.conversation-card div {
+  display: grid;
+  gap: 3px;
+}
+.conversation-card small,
+.conversation-status {
+  color: var(--muted);
+  font-size: 11px;
+}
+.second-opinion-badge {
+  padding: 5px 8px;
+  background: #7a4a00;
+  color: white;
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 
 @media (max-width: 980px) {
   .topbar { grid-template-columns: 1fr auto; padding: 0 18px; }
   .encounter-state { display: none; }
   main { padding: 0 18px 32px; }
+  .patient-workflow { grid-template-columns: 1fr; }
   .case-header { grid-template-columns: 1fr; gap: 26px; }
   .workspace { grid-template-columns: 1fr; }
   .evidence-panel { border-right: 0; border-bottom: 1px solid var(--rule); }

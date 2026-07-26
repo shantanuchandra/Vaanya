@@ -4,15 +4,28 @@ import staticFiles from "@fastify/static";
 import helmet from "@fastify/helmet";
 import Fastify from "fastify";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveProposal, signEncounter } from "@vaanaya/contracts";
+import {
+  resolveProposal,
+  signEncounter,
+  type Encounter,
+  type RecommendationQuestion,
+  type TranscriptTurn
+} from "@vaanaya/contracts";
 import { createDemoEncounter } from "./demo-encounter";
 import {
   MemoryEncounterStore,
   type EncounterStore
 } from "./encounter-store";
 import {
+  OpenAiPacClient,
+  type PacConversationTurn
+} from "./openai-client";
+import {
   SarvamClient,
+  type DiarizedSegment,
   type SarvamLanguageCode,
   type PacSuggestion,
   type TranscriptionInput,
@@ -50,6 +63,10 @@ type BuildServerOptions = {
   store?: EncounterStore;
   sarvamClient?: {
     transcribe(input: TranscriptionInput): Promise<TranscriptionResult>;
+    processDiarizedTranslation?(input: TranscriptionInput): Promise<{
+      requestId: string | null;
+      segments: DiarizedSegment[];
+    }>;
     extractPacSuggestions(input: {
       turnId: string;
       transcript: string;
@@ -62,12 +79,307 @@ type BuildServerOptions = {
     ): Promise<{ requestId: string | null; audioBase64: string }>;
   };
   authenticator?: Authenticator;
+  openAiPacClient?: {
+    structurePacConversation(
+      segments: DiarizedSegment[]
+    ): Promise<PacConversationTurn[]>;
+  };
   reviewStore?: ReviewStore;
   timingStore?: TimingStore;
 };
 
 const APPROVED_HANDOFF_TEXT =
   "Your pre-anesthetic check-up documentation is complete. Follow only the instructions confirmed by your clinician.";
+const EXAMPLE_RECORDING_PATH = fileURLToPath(
+  new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.demo-29s.mp4", import.meta.url)
+);
+const COMPLETE_EXAMPLE_RECORDING_PATH = fileURLToPath(
+  new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.mp4", import.meta.url)
+);
+
+type SpeechExtractionClient = NonNullable<BuildServerOptions["sarvamClient"]>;
+
+async function extractSpeechIntoEncounter(input: {
+  encounter: Encounter;
+  actorId: string;
+  sarvamClient: SpeechExtractionClient;
+  audio: {
+    bytes: Buffer;
+    filename: string;
+    mimeType: string;
+  };
+  languageCode: SarvamLanguageCode;
+}) {
+  const transcription = await input.sarvamClient.transcribe({
+    bytes: input.audio.bytes,
+    filename: input.audio.filename,
+    mimeType: input.audio.mimeType,
+    languageCode: input.languageCode
+  });
+  const turnId = `live-${Date.now()}`;
+  const rawSuggestions = await input.sarvamClient.extractPacSuggestions({
+    turnId,
+    transcript: transcription.transcript
+  });
+  const medicationUnknown =
+    /blood[\s-]*thin|khoon\s+patla/i.test(transcription.transcript) &&
+    /naam|name|yaad nahi|remember/i.test(transcription.transcript);
+  const suggestions = rawSuggestions
+    .filter(
+      item =>
+        ["medications", "allergies", "prior_anesthesia", "fasting", "open_items"].includes(
+          item.field
+        ) && item.sourceTurnIds.every(source => source === turnId)
+    )
+    .map(item =>
+      item.field === "medications" && medicationUnknown
+        ? {
+            ...item,
+            state: "uncertain" as const,
+            value:
+              "Patient describes a blood-thinning tablet; exact name is not recalled."
+          }
+        : item
+    );
+  const updated = {
+    ...input.encounter,
+    transcript: [
+      ...input.encounter.transcript,
+      {
+        id: turnId,
+        speaker: "patient" as const,
+        language: transcription.languageCode ?? "unknown",
+        original: transcription.transcript,
+        translation: transcription.transcript,
+        confidence: transcription.languageProbability ?? 0.85,
+        offsetSeconds:
+          (input.encounter.transcript.at(-1)?.offsetSeconds ?? 0) + 5
+      }
+    ],
+    proposals: [
+      ...input.encounter.proposals.filter(
+        existing => !suggestions.some(item => item.field === existing.id)
+      ),
+      ...suggestions.map(item => ({
+        id: item.field,
+        label:
+          item.field === "prior_anesthesia"
+            ? "Previous anesthesia"
+            : item.field.replaceAll("_", " "),
+        state: item.state,
+        value: item.value,
+        sourceTurnIds: item.sourceTurnIds,
+        required: input.encounter.requiredFieldIds.includes(item.field)
+      }))
+    ],
+    audit: [
+      ...input.encounter.audit,
+      {
+        id: crypto.randomUUID(),
+        action: "speech.suggestions_created",
+        actorId: input.actorId,
+        occurredAt: new Date().toISOString(),
+        detail: {
+          turnId,
+          suggestionCount: suggestions.length,
+          model: "sarvam-30b",
+          filename: input.audio.filename,
+          clinicianReviewRequired: true
+        }
+      }
+    ]
+  };
+  return { transcription, suggestions, encounter: updated };
+}
+
+function buildRecommendationQuestions(
+  transcript: string
+): RecommendationQuestion[] {
+  const questions: RecommendationQuestion[] = [];
+  if (/blood[\s-]*thin|khoon\s+patla|blood thinner/i.test(transcript)) {
+    questions.push({
+      id: "medication-name",
+      question: "Ask the patient to show the medicine strip or prescription.",
+      reason: "Blood thinner name is unknown."
+    });
+  }
+  if (/fever|cough|cold|infection/i.test(transcript)) {
+    questions.push({
+      id: "recent-illness",
+      question: "Ask when the fever or infection fully resolved.",
+      reason: "Recent illness can change anaesthesia readiness."
+    });
+  }
+  if (!questions.length) {
+    questions.push({
+      id: "confirm-open-items",
+      question: "Ask if any medicines, allergies, or prior anaesthesia issues were missed.",
+      reason: "No specific unresolved PAC risk was detected from the mock recording."
+    });
+  }
+  return questions;
+}
+
+function encounterFromMockRecording(input: {
+  encounter: Encounter;
+  actorId: string;
+  procedure?: string | undefined;
+  transcript: string;
+  sourceType: "live" | "uploaded_mp4";
+}): Encounter {
+  const turnId = `mock-${Date.now()}`;
+  const medicationUnknown =
+    /blood[\s-]*thin|khoon\s+patla|blood thinner/i.test(input.transcript) &&
+    /name|naam|remember|yaad/i.test(input.transcript);
+  const proposals = medicationUnknown
+    ? [
+        {
+          id: "medications",
+          label: "Current medicines",
+          state: "uncertain" as const,
+          value:
+            "Patient reports a blood thinner, but the exact medicine name is not recalled.",
+          sourceTurnIds: [turnId],
+          required: true
+        }
+      ]
+    : [
+        {
+          id: "open_items",
+          label: "Open PAC items",
+          state: "uncertain" as const,
+          value: "Mock recording processed; clinician review is required.",
+          sourceTurnIds: [turnId],
+          required: false
+        }
+      ];
+
+  return {
+    ...input.encounter,
+    procedure: input.procedure?.trim() || input.encounter.procedure,
+    state: "clinician_review",
+    sourceType: input.sourceType,
+    recommendationQuestions: buildRecommendationQuestions(input.transcript),
+    requiredFieldIds: ["medications"],
+    transcript: [
+      ...input.encounter.transcript,
+      {
+        id: turnId,
+        speaker: "patient",
+        language: input.encounter.preferredLanguage,
+        original: input.transcript,
+        translation: input.transcript,
+        confidence: 0.93,
+        offsetSeconds: (input.encounter.transcript.at(-1)?.offsetSeconds ?? 0) + 5
+      }
+    ],
+    proposals,
+    audit: [
+      ...input.encounter.audit,
+      {
+        id: crypto.randomUUID(),
+        action: "mock_recording.processed",
+        actorId: input.actorId,
+        occurredAt: new Date().toISOString(),
+        detail: {
+          sourceType: input.sourceType,
+          recommendationQuestionCount:
+            buildRecommendationQuestions(input.transcript).length
+        }
+      }
+    ]
+  };
+}
+
+function topicCounts(turns: PacConversationTurn[]) {
+  return turns.reduce<Record<string, number>>((counts, turn) => {
+    counts[turn.topic] = (counts[turn.topic] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function encounterFromDiarizedRecording(input: {
+  encounter: Encounter;
+  actorId: string;
+  sarvamRequestId: string | null;
+  segments: DiarizedSegment[];
+  turns: PacConversationTurn[];
+}): Encounter {
+  const bySegmentId = new Map(input.turns.map(turn => [turn.segmentId, turn]));
+  const transcript: TranscriptTurn[] = input.segments.map(segment => {
+    const turn = bySegmentId.get(segment.id);
+    const speaker: TranscriptTurn["speaker"] =
+      turn?.speakerRole === "clinician"
+        ? "clinician"
+        : turn?.speakerRole === "patient"
+          ? "patient"
+          : "system";
+    return {
+      id: segment.id,
+      speaker,
+      language: "en-IN",
+      original: segment.originalText,
+      translation: segment.translatedText,
+      confidence: 0.9,
+      offsetSeconds: segment.startSeconds
+    };
+  });
+  const medicationSegments = input.turns
+    .filter(turn => turn.topic === "medications")
+    .map(turn => turn.segmentId);
+  const uncertainMedication = input.segments.some(
+    segment =>
+      medicationSegments.includes(segment.id) &&
+      /blood thinner|forgot|do not remember|unknown|name/i.test(
+        segment.translatedText
+      )
+  );
+
+  return {
+    ...input.encounter,
+    state: "clinician_review",
+    sourceType: "uploaded_mp4",
+    transcript: [...input.encounter.transcript, ...transcript],
+    proposals: [
+      ...input.encounter.proposals.filter(
+        proposal => proposal.id !== "medications"
+      ),
+      {
+        id: "medications",
+        label: "Current medicines",
+        state: uncertainMedication ? "uncertain" : "captured",
+        value: uncertainMedication
+          ? "Patient reports a blood thinner, but the exact medicine name is not recalled."
+          : "Medication discussion captured from the synthetic recording; clinician review required.",
+        sourceTurnIds: medicationSegments.length
+          ? medicationSegments
+          : input.segments.map(segment => segment.id),
+        required: true
+      }
+    ],
+    recommendationQuestions: buildRecommendationQuestions(
+      input.segments.map(segment => segment.translatedText).join(" ")
+    ),
+    audit: [
+      ...input.encounter.audit,
+      {
+        id: crypto.randomUUID(),
+        action: "recording.synthetic_processed",
+        actorId: input.actorId,
+        occurredAt: new Date().toISOString(),
+        detail: {
+          syntheticDemo: true,
+          filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
+          sarvamRequestId: input.sarvamRequestId,
+          segmentCount: input.segments.length,
+          topicCounts: topicCounts(input.turns),
+          clinicianReviewRequired: true,
+          model: "gpt-5.6-sol"
+        }
+      }
+    ]
+  };
+}
 
 export async function buildServer(options: BuildServerOptions = {}) {
   const server = Fastify({ logger: false });
@@ -109,12 +421,24 @@ export async function buildServer(options: BuildServerOptions = {}) {
       maxAge: "1h",
       immutable: false
     });
+    server.addHook("onSend", async (_request, reply, payload) => {
+      const contentType = String(reply.getHeader("content-type") ?? "");
+      if (contentType.includes("text/html")) {
+        reply.header("cache-control", "no-store");
+      }
+      return payload;
+    });
   }
 
   const sarvamClient =
     options.sarvamClient ??
     (process.env.SARVAM_API_KEY
       ? new SarvamClient(process.env.SARVAM_API_KEY)
+      : null);
+  const openAiPacClient =
+    options.openAiPacClient ??
+    (process.env.OPENAI_API_KEY
+      ? new OpenAiPacClient(process.env.OPENAI_API_KEY)
       : null);
   const telegramClient = process.env.TELEGRAM_BOT_TOKEN
     ? new TelegramClient(process.env.TELEGRAM_BOT_TOKEN)
@@ -165,6 +489,128 @@ export async function buildServer(options: BuildServerOptions = {}) {
       process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_DEMO_CHAT_ID
     )
   }));
+
+  server.get<{ Querystring: { q?: string } }>("/api/patients", async request => {
+    return store.searchPatients({
+      organizationId: request.actor!.organizationId,
+      query: request.query.q ?? ""
+    });
+  });
+
+  server.post<{
+    Body: { displayName?: string; mobileNumber?: string };
+  }>("/api/patients", async (request, reply) => {
+    const displayName = request.body?.displayName?.trim();
+    const mobileNumber = request.body?.mobileNumber?.trim();
+    if (!displayName || !mobileNumber) {
+      return reply.code(400).send({
+        code: "INVALID_PATIENT",
+        message: "Patient name and mobile number are required."
+      });
+    }
+    const patient = await store.createPatient({
+      organizationId: request.actor!.organizationId,
+      actorId: request.actor!.id,
+      displayName,
+      mobileNumber
+    });
+    return reply.code(201).send(patient);
+  });
+
+  server.post<{
+    Body: {
+      patientId?: string;
+      procedure?: string;
+      preferredLanguage?: string;
+      sourceType?: "live" | "uploaded_mp4";
+    };
+  }>("/api/encounters", async (request, reply) => {
+    const { patientId, procedure, preferredLanguage, sourceType } =
+      request.body ?? {};
+    if (!patientId || !procedure || !preferredLanguage || !sourceType) {
+      return reply.code(400).send({
+        code: "INVALID_ENCOUNTER",
+        message: "Patient, procedure, language, and recording source are required."
+      });
+    }
+    try {
+      const encounter = await store.createEncounter({
+        organizationId: request.actor!.organizationId,
+        actorId: request.actor!.id,
+        patientId,
+        procedure,
+        preferredLanguage,
+        sourceType
+      });
+      return reply.code(201).send(encounter);
+    } catch (error) {
+      return reply.code(404).send({
+        code: "PATIENT_NOT_FOUND",
+        message: error instanceof Error ? error.message : "Patient not found."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+    Body: {
+      sourceType?: "live" | "uploaded_mp4";
+      procedure?: string;
+      transcript?: string;
+    };
+  }>("/api/encounters/:id/mock-recording", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    const sourceType = request.body?.sourceType ?? encounter.sourceType ?? "live";
+    const transcript = request.body?.transcript?.trim();
+    if (!transcript) {
+      return reply.code(400).send({
+        code: "TRANSCRIPT_REQUIRED",
+        message: "Mock recording transcript is required."
+      });
+    }
+    const saved = await store.save(
+      encounterFromMockRecording({
+        encounter,
+        actorId: request.actor!.id,
+        procedure: request.body?.procedure,
+        transcript,
+        sourceType
+      })
+    );
+    return saved;
+  });
+
+  server.post<{
+    Params: { id: string };
+  }>("/api/encounters/:id/second-opinion", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    const requestedAt = new Date().toISOString();
+    const saved = await store.save({
+      ...encounter,
+      secondOpinionRequested: true,
+      secondOpinionRequestedBy: request.actor!.id,
+      secondOpinionRequestedAt: requestedAt,
+      audit: [
+        ...encounter.audit,
+        {
+          id: crypto.randomUUID(),
+          action: "second_opinion.requested",
+          actorId: request.actor!.id,
+          occurredAt: requestedAt,
+          detail: {
+            patientReference: encounter.patientReference
+          }
+        }
+      ]
+    });
+    return saved;
+  });
 
   server.get("/api/reviews/golden-cases", async request => {
     const reviews = await reviewStore.list(request.actor!.organizationId);
@@ -336,91 +782,123 @@ export async function buildServer(options: BuildServerOptions = {}) {
       });
     }
     try {
-      const transcription = await sarvamClient.transcribe({
-        bytes: await audio.toBuffer(),
-        filename: audio.filename,
-        mimeType: audio.mimetype,
+      const extracted = await extractSpeechIntoEncounter({
+        encounter,
+        actorId: request.actor!.id,
+        sarvamClient,
+        audio: {
+          bytes: await audio.toBuffer(),
+          filename: audio.filename,
+          mimeType: audio.mimetype
+        },
         languageCode: request.query.languageCode ?? "unknown"
       });
-      const turnId = `live-${Date.now()}`;
-      const rawSuggestions = await sarvamClient.extractPacSuggestions({
-        turnId,
-        transcript: transcription.transcript
-      });
-      const medicationUnknown =
-        /blood[\s-]*thin|khoon\s+patla/i.test(transcription.transcript) &&
-        /naam|name|yaad nahi|remember/i.test(transcription.transcript);
-      const suggestions = rawSuggestions
-        .filter(
-          item =>
-            ["medications", "allergies", "prior_anesthesia", "fasting", "open_items"].includes(
-              item.field
-            ) && item.sourceTurnIds.every(source => source === turnId)
-        )
-        .map(item =>
-          item.field === "medications" && medicationUnknown
-            ? {
-                ...item,
-                state: "uncertain" as const,
-                value:
-                  "Patient describes a blood-thinning tablet; exact name is not recalled."
-              }
-            : item
-        );
-      const updated = {
-        ...encounter,
-        transcript: [
-          ...encounter.transcript,
-          {
-            id: turnId,
-            speaker: "patient" as const,
-            language: transcription.languageCode ?? "unknown",
-            original: transcription.transcript,
-            translation: transcription.transcript,
-            confidence: transcription.languageProbability ?? 0.85,
-            offsetSeconds:
-              (encounter.transcript.at(-1)?.offsetSeconds ?? 0) + 5
-          }
-        ],
-        proposals: [
-          ...encounter.proposals.filter(
-            existing => !suggestions.some(item => item.field === existing.id)
-          ),
-          ...suggestions.map(item => ({
-            id: item.field,
-            label:
-              item.field === "prior_anesthesia"
-                ? "Previous anesthesia"
-                : item.field.replaceAll("_", " "),
-            state: item.state,
-            value: item.value,
-            sourceTurnIds: item.sourceTurnIds,
-            required: encounter.requiredFieldIds.includes(item.field)
-          }))
-        ],
-        audit: [
-          ...encounter.audit,
-          {
-            id: crypto.randomUUID(),
-            action: "speech.suggestions_created",
-            actorId: request.actor!.id,
-            occurredAt: new Date().toISOString(),
-            detail: {
-              turnId,
-              suggestionCount: suggestions.length,
-              model: "sarvam-30b",
-              clinicianReviewRequired: true
-            }
-          }
-        ]
-      };
-      const saved = await store.save(updated);
-      return { transcription, suggestions, encounter: saved };
+      const saved = await store.save(extracted.encounter);
+      return { ...extracted, encounter: saved };
     } catch (error) {
       request.log.error({ error }, "Encounter speech extraction failed");
       return reply.code(502).send({
         code: "SPEECH_EXTRACTION_FAILED",
         message: "Speech could not be converted into review suggestions."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+    Querystring: { languageCode?: SarvamLanguageCode };
+  }>("/api/encounters/:id/example-recording", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    if (!encounter.consentRecorded || encounter.state !== "clinician_review") {
+      return reply.code(409).send({
+        code: "CAPTURE_NOT_ALLOWED",
+        message: "Example recording upload requires consent and clinician review state."
+      });
+    }
+    if (!sarvamClient) {
+      return reply.code(503).send({
+        code: "SARVAM_NOT_CONFIGURED",
+        message: "Sarvam transcription is not configured."
+      });
+    }
+    try {
+      const extracted = await extractSpeechIntoEncounter({
+        encounter,
+        actorId: request.actor!.id,
+        sarvamClient,
+        audio: {
+          bytes: await readFile(EXAMPLE_RECORDING_PATH),
+          filename: basename(EXAMPLE_RECORDING_PATH),
+          mimeType: "audio/mp4"
+        },
+        languageCode: request.query.languageCode ?? "hi-IN"
+      });
+      const saved = await store.save(extracted.encounter);
+      return { ...extracted, encounter: saved };
+    } catch (error) {
+      request.log.error({ error }, "Example recording extraction failed");
+      return reply.code(502).send({
+        code: "EXAMPLE_RECORDING_FAILED",
+        message: "The example MP4 could not be converted into evidence."
+      });
+    }
+  });
+
+  server.post<{
+    Params: { id: string };
+  }>("/api/encounters/:id/complete-example-recording", async (request, reply) => {
+    const encounter = await store.get(request.params.id);
+    if (!encounter) {
+      return reply.code(404).send({ code: "NOT_FOUND", message: "Encounter not found." });
+    }
+    if (!encounter.consentRecorded || encounter.state !== "clinician_review") {
+      return reply.code(409).send({
+        code: "CAPTURE_NOT_ALLOWED",
+        message:
+          "Complete synthetic recording upload requires consent and clinician review state."
+      });
+    }
+    if (!sarvamClient?.processDiarizedTranslation) {
+      return reply.code(503).send({
+        code: "SARVAM_BATCH_NOT_CONFIGURED",
+        message: "Sarvam batch diarized translation is not configured."
+      });
+    }
+    if (!openAiPacClient) {
+      return reply.code(503).send({
+        code: "OPENAI_NOT_CONFIGURED",
+        message: "OpenAI PAC structuring is not configured."
+      });
+    }
+    try {
+      const sarvamResult = await sarvamClient.processDiarizedTranslation({
+        bytes: await readFile(COMPLETE_EXAMPLE_RECORDING_PATH),
+        filename: basename(COMPLETE_EXAMPLE_RECORDING_PATH),
+        mimeType: "audio/mp4",
+        languageCode: "hi-IN"
+      });
+      const turns = await openAiPacClient.structurePacConversation(
+        sarvamResult.segments
+      );
+      const saved = await store.save(
+        encounterFromDiarizedRecording({
+          encounter,
+          actorId: request.actor!.id,
+          sarvamRequestId: sarvamResult.requestId,
+          segments: sarvamResult.segments,
+          turns
+        })
+      );
+      return { status: "completed" as const, encounter: saved };
+    } catch (error) {
+      request.log.error({ error }, "Complete synthetic recording processing failed");
+      return reply.code(502).send({
+        code: "COMPLETE_SYNTHETIC_RECORDING_FAILED",
+        message:
+          "The complete synthetic recording could not be diarized, translated, or structured."
       });
     }
   });

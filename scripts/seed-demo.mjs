@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 
 const url = process.env.SUPABASE_URL;
@@ -19,9 +18,14 @@ function must(result, label) {
 }
 
 const clinicianEmail =
+  process.env.SURUCHI_DEMO_EMAIL ??
   process.env.DEMO_CLINICIAN_EMAIL ??
-  "synthetic-clinician@vaanaya.invalid";
-const clinicianPassword = process.env.DEMO_CLINICIAN_PASSWORD;
+  "suruchi.patel@artemis.com";
+const clinicianPassword =
+  process.env.SURUCHI_DEMO_PASSWORD ?? process.env.DEMO_CLINICIAN_PASSWORD;
+if (!clinicianPassword) {
+  throw new Error("SURUCHI_DEMO_PASSWORD is required.");
+}
 const users = must(
   await client.auth.admin.listUsers({ page: 1, perPage: 1000 }),
   "list demo users"
@@ -32,13 +36,13 @@ if (!clinician) {
   clinician = must(
     await client.auth.admin.createUser({
       email: clinicianEmail,
-      password: clinicianPassword ?? randomBytes(24).toString("base64url"),
+      password: clinicianPassword,
       email_confirm: true,
       user_metadata: { synthetic: true, product: "Vaanaya" }
     }),
     "create synthetic clinician"
   ).user;
-} else if (clinicianPassword) {
+} else {
   clinician = must(
     await client.auth.admin.updateUserById(clinician.id, {
       password: clinicianPassword,

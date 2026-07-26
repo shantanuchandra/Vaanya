@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { buildServer } from "./server";
+import type { DiarizedSegment, TranscriptionInput } from "./sarvam-client";
 
 const servers: Awaited<ReturnType<typeof buildServer>>[] = [];
 const authorized = {
@@ -255,6 +258,278 @@ describe("encounter API", () => {
     expect(JSON.stringify(body)).not.toMatch(/aspirin|stop before surgery/i);
   });
 
+  it("creates a patient encounter and populates PAC fields plus next questions from a mocked recording", async () => {
+    const server = await buildServer({ authenticator: testAuthenticator });
+    servers.push(server);
+
+    const patient = await server.inject({
+      method: "POST",
+      url: "/api/patients",
+      headers: authorized,
+      payload: {
+        displayName: "Ravi Kumar",
+        mobileNumber: "+919900001111"
+      }
+    });
+    expect(patient.statusCode).toBe(201);
+
+    const listed = await server.inject({
+      method: "GET",
+      url: "/api/patients?q=ravi",
+      headers: authorized
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toContainEqual(
+      expect.objectContaining({
+        displayName: "Ravi Kumar",
+        mobileLast4: "1111"
+      })
+    );
+
+    const encounter = await server.inject({
+      method: "POST",
+      url: "/api/encounters",
+      headers: authorized,
+      payload: {
+        patientId: patient.json().id,
+        procedure: "Elective hernia repair",
+        preferredLanguage: "hi-IN",
+        sourceType: "uploaded_mp4"
+      }
+    });
+    expect(encounter.statusCode).toBe(201);
+
+    const recording = await server.inject({
+      method: "POST",
+      url: `/api/encounters/${encounter.json().id}/mock-recording`,
+      headers: authorized,
+      payload: {
+        sourceType: "uploaded_mp4",
+        transcript:
+          "I take a blood thinner but I do not remember the name. I had fever last week."
+      }
+    });
+
+    expect(recording.statusCode).toBe(200);
+    expect(recording.json()).toMatchObject({
+      patient: {
+        displayName: "Ravi Kumar",
+        mobileNumber: "+919900001111"
+      },
+      sourceType: "uploaded_mp4",
+      state: "clinician_review"
+    });
+    expect(recording.json().proposals).toContainEqual(
+      expect.objectContaining({
+        id: "medications",
+        state: "uncertain",
+        value: expect.stringMatching(/blood thinner/i)
+      })
+    );
+    expect(recording.json().recommendationQuestions).toContainEqual(
+      expect.objectContaining({
+        id: "medication-name",
+        question: expect.stringMatching(/strip|prescription/i)
+      })
+    );
+
+    const secondOpinion = await server.inject({
+      method: "POST",
+      url: `/api/encounters/${encounter.json().id}/second-opinion`,
+      headers: authorized
+    });
+    expect(secondOpinion.statusCode).toBe(200);
+    expect(secondOpinion.json()).toMatchObject({
+      secondOpinionRequested: true,
+      secondOpinionRequestedBy: "demo-clinician"
+    });
+    expect(secondOpinion.json().audit).toContainEqual(
+      expect.objectContaining({
+        action: "second_opinion.requested",
+        actorId: "demo-clinician"
+      })
+    );
+  });
+
+  it("uploads the bundled example MP4 through Sarvam and appends it to the evidence rail", async () => {
+    const exampleBytes = readFileSync(
+      fileURLToPath(
+        new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.demo-29s.mp4", import.meta.url)
+      )
+    );
+    const sarvamInputs: TranscriptionInput[] = [];
+    const server = await buildServer({
+      authenticator: testAuthenticator,
+      sarvamClient: {
+        transcribe: async input => {
+          sarvamInputs.push(input);
+          return {
+            requestId: "sarvam-example-1",
+            transcript:
+              "Woh khoon patla karne wali goli leta hoon, naam yaad nahi.",
+            languageCode: "hi-IN",
+            languageProbability: 0.97
+          };
+        },
+        extractPacSuggestions: async ({ turnId }) => [
+          {
+            field: "medications",
+            state: "captured",
+            value: "Blood thinner name not recalled.",
+            sourceTurnIds: [turnId]
+          }
+        ],
+        translateToKannada: async input => ({
+          requestId: null,
+          translatedText: input
+        }),
+        synthesizeKannada: async () => ({
+          requestId: null,
+          audioBase64: ""
+        })
+      }
+    });
+    servers.push(server);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/example-recording?languageCode=hi-IN",
+      headers: authorized
+    });
+
+    expect(response.statusCode).toBe(200);
+    const capturedSarvamInput = sarvamInputs[0];
+    expect(capturedSarvamInput).toBeDefined();
+    if (!capturedSarvamInput) throw new Error("Sarvam was not called.");
+    expect(capturedSarvamInput.filename).toBe(
+      "WhatsApp Audio 2026-07-26 at 09.14.01.demo-29s.mp4"
+    );
+    expect(capturedSarvamInput.mimeType).toBe("audio/mp4");
+    expect(Buffer.compare(Buffer.from(capturedSarvamInput.bytes), exampleBytes)).toBe(0);
+    expect(response.json().transcription).toMatchObject({
+      requestId: "sarvam-example-1",
+      languageCode: "hi-IN"
+    });
+    expect(response.json().encounter.transcript.at(-1)).toMatchObject({
+      speaker: "patient",
+      original: expect.stringMatching(/khoon patla/i),
+      confidence: 0.97
+    });
+    expect(response.json().encounter.proposals).toContainEqual(
+      expect.objectContaining({
+        id: "medications",
+        state: "uncertain",
+        sourceTurnIds: [expect.stringMatching(/^live-/)]
+      })
+    );
+  });
+
+  it("processes the complete synthetic recording into diarized PAC evidence", async () => {
+    const fullBytes = readFileSync(
+      fileURLToPath(
+        new URL("../../../Examples/WhatsApp Audio 2026-07-26 at 09.14.01.mp4", import.meta.url)
+      )
+    );
+    const segments: DiarizedSegment[] = [
+      {
+        id: "seg-1",
+        speakerLabel: "Speaker 0",
+        originalText: "Do you take any regular medicines?",
+        translatedText: "Do you take any regular medicines?",
+        startSeconds: 0,
+        endSeconds: 1.8
+      },
+      {
+        id: "seg-2",
+        speakerLabel: "Speaker 1",
+        originalText: "I take a blood thinner but forgot the name.",
+        translatedText: "I take a blood thinner but forgot the name.",
+        startSeconds: 2.1,
+        endSeconds: 4.2
+      }
+    ];
+    const sarvamInputs: TranscriptionInput[] = [];
+    const openAiSegments: DiarizedSegment[][] = [];
+    const server = await buildServer({
+      authenticator: testAuthenticator,
+      sarvamClient: {
+        transcribe: async () => {
+          throw new Error("REST STT should not be used for the full recording.");
+        },
+        processDiarizedTranslation: async input => {
+          sarvamInputs.push(input);
+          return { requestId: "sarvam-batch-1", segments };
+        },
+        extractPacSuggestions: async () => [],
+        translateToKannada: async input => ({
+          requestId: null,
+          translatedText: input
+        }),
+        synthesizeKannada: async () => ({
+          requestId: null,
+          audioBase64: ""
+        })
+      },
+      openAiPacClient: {
+        structurePacConversation: async input => {
+          openAiSegments.push(input);
+          return [
+            {
+              segmentId: "seg-1",
+              speakerRole: "clinician",
+              topic: "medications",
+              uncertainty: false
+            },
+            {
+              segmentId: "seg-2",
+              speakerRole: "patient",
+              topic: "medications",
+              uncertainty: true
+            }
+          ];
+        }
+      }
+    });
+    servers.push(server);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/complete-example-recording",
+      headers: authorized
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(sarvamInputs[0]).toMatchObject({
+      filename: "WhatsApp Audio 2026-07-26 at 09.14.01.mp4",
+      mimeType: "audio/mp4",
+      languageCode: "hi-IN"
+    });
+    expect(Buffer.compare(Buffer.from(sarvamInputs[0]?.bytes ?? []), fullBytes)).toBe(0);
+    expect(openAiSegments[0]).toEqual(segments);
+    expect(response.json()).toMatchObject({ status: "completed" });
+    expect(response.json().encounter.transcript).toContainEqual(
+      expect.objectContaining({
+        id: "seg-2",
+        speaker: "patient",
+        language: "en-IN",
+        original: "I take a blood thinner but forgot the name.",
+        translation: "I take a blood thinner but forgot the name.",
+        offsetSeconds: 2.1
+      })
+    );
+    expect(response.json().encounter.audit).toContainEqual(
+      expect.objectContaining({
+        action: "recording.synthetic_processed",
+        detail: expect.objectContaining({
+          syntheticDemo: true,
+          sarvamRequestId: "sarvam-batch-1",
+          segmentCount: 2,
+          topicCounts: { medications: 2 }
+        })
+      })
+    );
+  });
+
   it("reports adapter readiness without exposing secrets", async () => {
     const server = await buildServer({ authenticator: testAuthenticator });
     servers.push(server);
@@ -282,6 +557,7 @@ describe("encounter API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["cache-control"]).toBe("no-store");
   });
 
   it("allows the configured Supabase Auth origin in browser CSP", async () => {
