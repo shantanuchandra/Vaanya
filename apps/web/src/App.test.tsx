@@ -360,6 +360,77 @@ describe("PAC review workspace", () => {
     expect(screen.getByText(/Sarvam translated evidence/i)).toBeInTheDocument();
   });
 
+  it("lets the clinician upload a selected conversation file", async () => {
+    const user = userEvent.setup();
+    const uploadedEncounter = {
+      ...demoEncounter,
+      transcript: [
+        ...demoEncounter.transcript,
+        {
+          id: "upload-seg-1",
+          speaker: "patient",
+          language: "en-IN",
+          original: "I take a blood thinner but forgot the name.",
+          translation: "I take a blood thinner but forgot the name.",
+          confidence: 0.9,
+          offsetSeconds: 2.1
+        }
+      ],
+      customerSummary: "Uploaded PAC conversation is ready for doctor review."
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/patients")) {
+        return {
+          ok: true,
+          json: async () => [demoEncounter.patient]
+        };
+      }
+      if (url.includes("/complete-recording")) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: "completed",
+            filename: "suruchi-pac.mp4",
+            encounter: uploadedEncounter
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => demoEncounter
+      };
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    render(<App />);
+    await user.type(await screen.findByLabelText(/find patient/i), "demo");
+    await user.click(
+      await screen.findByRole("button", { name: /demo patient/i })
+    );
+    const file = new File(["audio"], "suruchi-pac.mp4", { type: "audio/mp4" });
+    await user.upload(screen.getByLabelText(/conversation recording file/i), file);
+
+    expect(screen.getByText(/suruchi-pac.mp4/i)).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /upload selected conversation/i })
+    );
+
+    expect(
+      await screen.findByText(/uploaded pac conversation is ready/i)
+    ).toBeInTheDocument();
+    const uploadCall = (
+      fetcher.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit | undefined]
+      >
+    ).find(([input]) => String(input).includes("/complete-recording"));
+    expect(uploadCall?.[1]?.body).toBeInstanceOf(FormData);
+    expect((uploadCall?.[1]?.body as FormData).get("file")).toMatchObject({
+      name: "suruchi-pac.mp4",
+      type: "audio/mp4"
+    });
+  });
+
   it("shows the customer summary drawer and mocks sending it by email", async () => {
     const user = userEvent.setup();
     const processedEncounter = {

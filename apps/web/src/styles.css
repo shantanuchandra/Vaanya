@@ -844,6 +844,16 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   font: inherit;
   outline: 0;
 }
+.recording-file-picker input {
+  padding: 9px;
+  font-size: 12px;
+}
+.recording-file-picker span {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
 .recording-actions button {
   display: inline-flex;
   align-items: center;

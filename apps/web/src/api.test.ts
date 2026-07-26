@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   deferChecklistItemRequest,
   getRecordings,
+  processCompleteRecordingFile,
   setAccessTokenProvider,
   transcribeEncounterSpeech,
   transcribeAudio
@@ -124,6 +125,43 @@ describe("speech API", () => {
     expect(fetcher.mock.calls[0]![0]).toBe(
       "/api/encounters/demo/speech?languageCode=hi-IN"
     );
+  });
+
+  it("uploads a selected PAC conversation file to the complete recording route", async () => {
+    const uploaded = new File(["audio"], "doctor-upload.mp4", {
+      type: "audio/mp4"
+    });
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "completed",
+        filename: "doctor-upload.mp4",
+        encounter: {
+          id: "demo",
+          patientReference: "SYN-PAC-042",
+          procedure: "Procedure",
+          preferredLanguage: "hi-IN",
+          state: "clinician_review",
+          consentRecorded: true,
+          requiredFieldIds: [],
+          proposals: [],
+          transcript: [],
+          audit: []
+        }
+      })
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await processCompleteRecordingFile("demo", uploaded);
+
+    const [url, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/encounters/demo/complete-recording");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeInstanceOf(FormData);
+    expect((init.body as FormData).get("file")).toMatchObject({
+      name: "doctor-upload.mp4",
+      type: "audio/mp4"
+    });
   });
 
   it("records a clinician deferral reason through the checklist route", async () => {

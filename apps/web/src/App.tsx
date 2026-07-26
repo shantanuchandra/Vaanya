@@ -24,6 +24,7 @@ import {
   deferChecklistItemRequest,
   enterChecklistItemRequest,
   processCompleteExampleRecording,
+  processCompleteRecordingFile,
   createKannadaHandoff,
   createPatientSummaryHandoff,
   getEncounter,
@@ -94,7 +95,11 @@ function App() {
   const [resolution, setResolution] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [recordingAction, setRecordingAction] = useState<"complete" | null>(null);
+  const [recordingAction, setRecordingAction] = useState<
+    "complete" | "file" | null
+  >(null);
+  const [selectedRecordingFile, setSelectedRecordingFile] =
+    useState<File | null>(null);
   const [handoff, setHandoff] = useState<KannadaHandoff | null>(null);
   const [patientSummaryLanguage, setPatientSummaryLanguage] =
     useState<PatientSummaryLanguageCode>("hi-IN");
@@ -336,6 +341,43 @@ function App() {
     }
   }
 
+  async function uploadSelectedRecordingFile() {
+    if (!selectedPatient || !selectedRecordingFile) return;
+    setBusy(true);
+    setRecordingAction("file");
+    setSummaryEmailSent(false);
+    setNotice(`Uploading ${selectedRecordingFile.name}`);
+    try {
+      const draft =
+        encounter?.patient?.id === selectedPatient.id
+          ? encounter
+          : await createEncounterRequest({
+              patientId: selectedPatient.id,
+              procedure: procedure.trim(),
+              preferredLanguage: encounter?.preferredLanguage ?? "hi-IN",
+              sourceType: "uploaded_mp4"
+            });
+      const extracted = await processCompleteRecordingFile(
+        draft.id,
+        selectedRecordingFile
+      );
+      setEncounter(extracted.encounter);
+      setSelectedField(extracted.encounter.proposals.at(-1)?.id ?? null);
+      setNotice(
+        `${extracted.filename} processed with Sarvam diarization and OpenAI PAC structuring.`
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Selected recording upload failed."
+      );
+    } finally {
+      setBusy(false);
+      setRecordingAction(null);
+    }
+  }
+
   async function raiseSecondOpinion() {
     if (!encounter) return;
     setBusy(true);
@@ -475,6 +517,34 @@ function App() {
               {recordingAction === "complete"
                 ? "Diarizing and translating with Sarvam..."
                 : "Upload complete synthetic recording"}
+            </button>
+            <label className="recording-file-picker">
+              Conversation recording file
+              <input
+                type="file"
+                accept="audio/*,video/mp4,.mp4,.m4a,.webm,.wav,.mp3"
+                onChange={event =>
+                  setSelectedRecordingFile(event.currentTarget.files?.[0] ?? null)
+                }
+              />
+              {selectedRecordingFile ? (
+                <span>{selectedRecordingFile.name}</span>
+              ) : null}
+            </label>
+            <button
+              type="button"
+              onClick={uploadSelectedRecordingFile}
+              disabled={
+                !selectedPatient ||
+                !procedure.trim() ||
+                !selectedRecordingFile ||
+                busy
+              }
+            >
+              <Radio size={16} />
+              {recordingAction === "file"
+                ? "Uploading selected conversation..."
+                : "Upload selected conversation"}
             </button>
           </div>
           {encounter.recommendationQuestions?.length ? (

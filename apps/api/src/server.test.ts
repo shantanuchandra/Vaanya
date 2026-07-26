@@ -666,6 +666,90 @@ describe("encounter API", () => {
     );
   });
 
+  it("processes a clinician-uploaded conversation file into diarized PAC evidence", async () => {
+    const segments: DiarizedSegment[] = [
+      {
+        id: "upload-seg-1",
+        speakerLabel: "Speaker 0",
+        originalText: "Please confirm your medicine.",
+        translatedText: "Please confirm your medicine.",
+        startSeconds: 0,
+        endSeconds: 1.5
+      }
+    ];
+    const sarvamInputs: TranscriptionInput[] = [];
+    const server = await buildServer({
+      authenticator: testAuthenticator,
+      sarvamClient: {
+        transcribe: async () => {
+          throw new Error("REST STT should not be used for uploaded PAC files.");
+        },
+        processDiarizedTranslation: async input => {
+          sarvamInputs.push(input);
+          return { requestId: "sarvam-upload-1", segments };
+        },
+        extractPacSuggestions: async () => [],
+        translateToKannada: async input => ({
+          requestId: null,
+          translatedText: input
+        }),
+        synthesizeKannada: async () => ({
+          requestId: null,
+          audioBase64: ""
+        })
+      },
+      openAiPacClient: {
+        structurePacConversation: async input => ({
+          customerSummary: "Uploaded PAC conversation is ready for doctor review.",
+          turns: input.map(segment => ({
+            segmentId: segment.id,
+            speakerRole: "clinician",
+            topic: "administrative",
+            uncertainty: false
+          })),
+          checklistProposals: []
+        })
+      }
+    });
+    servers.push(server);
+    const boundary = "----vaanaya-upload-test";
+    const multipart = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="doctor-upload.mp4"\r\nContent-Type: audio/mp4\r\n\r\n`
+      ),
+      Buffer.from("uploaded-audio-bytes"),
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/complete-recording",
+      headers: {
+        ...authorized,
+        "content-type": `multipart/form-data; boundary=${boundary}`
+      },
+      payload: multipart
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: "completed",
+      filename: "doctor-upload.mp4",
+      encounter: {
+        customerSummary: "Uploaded PAC conversation is ready for doctor review."
+      }
+    });
+    expect(sarvamInputs).toHaveLength(1);
+    expect(sarvamInputs[0]).toMatchObject({
+      filename: "doctor-upload.mp4",
+      mimeType: "audio/mp4",
+      languageCode: "hi-IN"
+    });
+    expect(Buffer.from(sarvamInputs[0]?.bytes ?? []).toString()).toBe(
+      "uploaded-audio-bytes"
+    );
+  });
+
   it("reports adapter readiness without exposing secrets", async () => {
     const server = await buildServer({ authenticator: testAuthenticator });
     servers.push(server);
