@@ -332,6 +332,15 @@ describe("encounter API", () => {
           requestId: null,
           audioBase64: ""
         })
+      },
+      openAiPacClient: {
+        structurePacConversation: async () => {
+          throw new Error("not used");
+        },
+        highlightEvidencePhrases: async () => [
+          "khoon patla karne wali goli",
+          "naam yaad nahi"
+        ]
       }
     });
     servers.push(server);
@@ -345,7 +354,7 @@ describe("encounter API", () => {
     ]);
     const response = await server.inject({
       method: "POST",
-      url: "/api/encounters/demo/speech?languageCode=hi-IN",
+      url: "/api/encounters/demo/speech?languageCode=hi-IN&durationSeconds=12.4",
       headers: {
         ...authorized,
         "content-type": `multipart/form-data; boundary=${boundary}`
@@ -361,7 +370,66 @@ describe("encounter API", () => {
       state: "uncertain"
     });
     expect(body.suggestions[0].sourceTurnIds).toHaveLength(1);
+    expect(body.encounter.transcript.at(-1)).toMatchObject({
+      evidencePhrases: [
+        "khoon patla karne wali goli",
+        "naam yaad nahi"
+      ]
+    });
+    expect(body.encounter.recordings).toContainEqual(
+      expect.objectContaining({
+        sourceType: "microphone",
+        durationSeconds: 12.4
+      })
+    );
     expect(JSON.stringify(body)).not.toMatch(/aspirin|stop before surgery/i);
+  });
+
+  it("does not count a microphone recording when transcription fails", async () => {
+    const server = await buildServer({
+      authenticator: testAuthenticator,
+      sarvamClient: {
+        transcribe: async () => {
+          throw new Error("synthetic STT failure");
+        },
+        extractPacSuggestions: async () => [],
+        translateToKannada: async input => ({
+          requestId: null,
+          translatedText: input
+        }),
+        synthesizeKannada: async () => ({
+          requestId: null,
+          audioBase64: ""
+        })
+      }
+    });
+    servers.push(server);
+    const boundary = "----vaanaya-failed-recording";
+    const multipart = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="failed.webm"\r\nContent-Type: audio/webm\r\n\r\n`
+      ),
+      Buffer.from("synthetic-audio"),
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/encounters/demo/speech?languageCode=hi-IN&durationSeconds=9",
+      headers: {
+        ...authorized,
+        "content-type": `multipart/form-data; boundary=${boundary}`
+      },
+      payload: multipart
+    });
+    const encounter = await server.inject({
+      method: "GET",
+      url: "/api/encounters/demo",
+      headers: authorized
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(encounter.json().recordings).toHaveLength(1);
   });
 
   it("creates a patient encounter and populates PAC fields plus next questions from a mocked recording", async () => {
@@ -587,13 +655,15 @@ describe("encounter API", () => {
                 segmentId: "seg-1",
                 speakerRole: "clinician",
                 topic: "medications",
-                uncertainty: false
+                uncertainty: false,
+                evidencePhrases: ["regular medicines"]
               },
               {
                 segmentId: "seg-2",
                 speakerRole: "patient",
                 topic: "medications",
-                uncertainty: true
+                uncertainty: true,
+                evidencePhrases: ["blood thinner", "forgot the name"]
               }
             ],
             checklistProposals: [
@@ -649,9 +719,16 @@ describe("encounter API", () => {
         language: "en-IN",
         original: "I take a blood thinner but forgot the name.",
         translation: "I take a blood thinner but forgot the name.",
+        evidencePhrases: ["blood thinner", "forgot the name"],
         offsetSeconds: 2.1
       })
     );
+    expect(response.json().encounter.recordings).toEqual([
+      expect.objectContaining({
+        sourceType: "uploaded_mp4",
+        durationSeconds: 4.2
+      })
+    ]);
     expect(response.json().encounter.audit).toContainEqual(
       expect.objectContaining({
         action: "recording.synthetic_processed",
@@ -705,7 +782,8 @@ describe("encounter API", () => {
             segmentId: segment.id,
             speakerRole: "clinician",
             topic: "administrative",
-            uncertainty: false
+            uncertainty: false,
+            evidencePhrases: ["confirm your medicine"]
           })),
           checklistProposals: []
         })

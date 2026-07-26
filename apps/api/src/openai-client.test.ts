@@ -13,13 +13,19 @@ describe("OpenAiPacClient", () => {
             segmentId: "seg-1",
             speakerRole: "clinician",
             topic: "medications",
-            uncertainty: false
+            uncertainty: false,
+            evidencePhrases: ["regular medicines"]
           },
           {
             segmentId: "seg-2",
             speakerRole: "patient",
             topic: "medications",
-            uncertainty: true
+            uncertainty: true,
+            evidencePhrases: [
+              "blood thinner",
+              "forgot the name",
+              "invented diagnosis"
+            ]
           }
         ],
         checklistProposals: [
@@ -67,13 +73,15 @@ describe("OpenAiPacClient", () => {
         segmentId: "seg-1",
         speakerRole: "clinician",
         topic: "medications",
-        uncertainty: false
+        uncertainty: false,
+        evidencePhrases: ["regular medicines"]
       },
       {
         segmentId: "seg-2",
         speakerRole: "patient",
         topic: "medications",
-        uncertainty: true
+        uncertainty: true,
+        evidencePhrases: ["blood thinner", "forgot the name"]
       }
     ]);
     const request = parse.mock.calls[0]?.[0];
@@ -82,7 +90,7 @@ describe("OpenAiPacClient", () => {
       "synthetic pre-anesthetic check-up"
     );
     expect(result.customerSummary).toContain("doctor review");
-    expect(JSON.stringify(result.turns)).not.toContain("blood thinner");
+    expect(result.turns[1]).not.toHaveProperty("translatedText");
     expect(result.checklistProposals).toEqual([
       expect.objectContaining({
         itemId: "medications",
@@ -92,6 +100,29 @@ describe("OpenAiPacClient", () => {
     const userInput = JSON.parse(request.input[1].content);
     expect(userInput.checklistItems).toEqual([
       { itemId: "medications", label: "Current or recent medicines" }
+    ]);
+  });
+
+  it("returns only literal PAC evidence phrases for a live transcript", async () => {
+    const parse = vi.fn().mockResolvedValue({
+      id: "run-highlight-1",
+      output_parsed: {
+        evidencePhrases: [
+          "climb one flight of stairs",
+          "become breathless",
+          "not present in transcript"
+        ]
+      }
+    });
+    const client = new OpenAiPacClient("openai-key", { responses: { parse } });
+
+    const phrases = await client.highlightEvidencePhrases(
+      "I can climb one flight of stairs but become breathless."
+    );
+
+    expect(phrases).toEqual([
+      "climb one flight of stairs",
+      "become breathless"
     ]);
   });
 

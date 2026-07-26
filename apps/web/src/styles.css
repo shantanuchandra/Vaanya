@@ -455,6 +455,15 @@ main { max-width: 1500px; margin: 0 auto; padding: 0 34px 54px; }
   font-family: var(--mono);
   font-size: 10px;
 }
+.recording-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.recording-duration {
+  color: var(--ink);
+  font: 600 12px var(--mono);
+}
 .speech-capture {
   margin: 16px 24px 0;
   padding: 14px;
@@ -481,7 +490,7 @@ main { max-width: 1500px; margin: 0 auto; padding: 0 34px 54px; }
   text-transform: uppercase;
 }
 .capture-prompt, .capture-result p {
-  margin: 10px 130px 0 0;
+  margin: 10px 0 0;
   font-size: 11px;
   line-height: 1.45;
   color: var(--muted);
@@ -495,30 +504,40 @@ main { max-width: 1500px; margin: 0 auto; padding: 0 34px 54px; }
   text-transform: uppercase;
 }
 .capture-button {
-  position: absolute;
-  right: 14px;
-  bottom: 14px;
-  min-width: 112px;
+  position: static;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 12px;
   border: 1px solid var(--green);
-  background: transparent;
-  color: var(--green);
+  border-radius: 12px;
+  background: var(--green);
+  color: white;
   padding: 8px 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 620;
   cursor: pointer;
 }
 .is-recording .capture-button {
   border-color: var(--amber);
-  color: var(--amber);
+  background: var(--amber);
+  color: #251708;
 }
 .capture-error { margin: 8px 0 0; color: var(--red); font-size: 10px; }
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .evidence-list { padding: 20px 24px 28px; }
+.evidence-keyword {
+  padding: 1px 3px;
+  border-radius: 4px;
+  background: #f7d98d;
+  color: #3e2c05;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
 .evidence-turn {
   display: grid;
   grid-template-columns: 42px 14px 1fr;
@@ -853,6 +872,11 @@ button:disabled { opacity: 0.43; cursor: not-allowed; }
   font-size: 11px;
   font-weight: 650;
   overflow-wrap: anywhere;
+}
+.selected-recording-preview {
+  margin-top: 10px;
+  width: min(420px, 100%);
+  height: 34px;
 }
 .recording-actions button {
   display: inline-flex;
@@ -1249,6 +1273,27 @@ main {
   display: block;
   margin-bottom: 6px;
   color: var(--green);
+}
+
+.patient-audio-trigger {
+  min-height: 42px;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--green);
+  color: white;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.patient-audio-trigger:focus-visible {
+  outline: 3px solid rgba(23, 76, 60, 0.24);
+  outline-offset: 3px;
 }
 
 .patient-language-output audio {

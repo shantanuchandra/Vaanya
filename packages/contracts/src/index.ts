@@ -42,10 +42,20 @@ export const TranscriptTurnSchema = z.object({
   language: z.string().min(2),
   original: z.string().min(1),
   translation: z.string().min(1),
+  evidencePhrases: z.array(z.string().min(1)).optional(),
   confidence: z.number().min(0).max(1),
   offsetSeconds: z.number().nonnegative()
 });
 export type TranscriptTurn = z.infer<typeof TranscriptTurnSchema>;
+
+export const RecordingMetadataSchema = z.object({
+  id: z.string().min(1),
+  sourceType: z.enum(["uploaded_mp4", "microphone"]),
+  durationSeconds: z.number().nonnegative(),
+  recordedAt: z.string().datetime()
+});
+
+export type RecordingMetadata = z.infer<typeof RecordingMetadataSchema>;
 
 export const FieldProposalSchema = z
   .object({
@@ -135,6 +145,7 @@ export const EncounterSchema = z.object({
   state: EncounterStateSchema,
   consentRecorded: z.boolean(),
   sourceType: z.enum(["live", "uploaded_mp4"]).optional(),
+  recordings: z.array(RecordingMetadataSchema).default([]),
   customerSummary: z.string().min(1).optional(),
   secondOpinionRequested: z.boolean().optional(),
   secondOpinionRequestedBy: z.string().min(1).optional(),

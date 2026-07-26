@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import App from "./App";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -53,6 +54,98 @@ const demoEncounter = {
 };
 
 describe("PAC review workspace", () => {
+  it("previews the selected conversation recording immediately before upload", async () => {
+    const user = userEvent.setup();
+    const createObjectURL = vi.fn(
+      (file: Blob) => `blob:preview-${(file as File).name}`
+    );
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => demoEncounter
+      }))
+    );
+
+    render(<App />);
+
+    const input = await screen.findByLabelText(/conversation recording file/i);
+    const firstFile = new File(["first audio"], "first-pac.mp3", {
+      type: "audio/mpeg"
+    });
+
+    await user.upload(input, firstFile);
+
+    const preview = screen.getByLabelText("Preview selected conversation audio");
+    expect(preview).toHaveAttribute("src", "blob:preview-first-pac.mp3");
+    expect(screen.getByText("first-pac.mp3")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /upload selected conversation/i })
+    ).toBeInTheDocument();
+
+    const secondFile = new File(["second audio"], "second-pac.wav", {
+      type: "audio/wav"
+    });
+    await user.upload(input, secondFile);
+
+    expect(
+      screen.getByLabelText("Preview selected conversation audio")
+    ).toHaveAttribute("src", "blob:preview-second-pac.wav");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:preview-first-pac.mp3");
+  });
+
+  it("shows real recording totals and highlights OpenAI-grounded evidence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          ...demoEncounter,
+          recordings: [
+            {
+              id: "r1",
+              sourceType: "uploaded_mp4",
+              durationSeconds: 76,
+              recordedAt: "2026-07-26T09:14:01.000Z"
+            },
+            {
+              id: "r2",
+              sourceType: "microphone",
+              durationSeconds: 12.4,
+              recordedAt: "2026-07-26T09:20:00.000Z"
+            }
+          ],
+          transcript: [
+            {
+              ...demoEncounter.transcript[0],
+              evidencePhrases: [
+                "blood-thinning tablet",
+                "do not remember the name",
+                "yesterday"
+              ]
+            }
+          ]
+        })
+      }))
+    );
+
+    const { container } = render(<App />);
+
+    expect(await screen.findByText("2 recordings")).toBeInTheDocument();
+    expect(screen.getByText("1:28")).toBeInTheDocument();
+    expect(screen.queryByText("01:16")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Record additional interaction" })
+    ).toBeInTheDocument();
+    expect(container.querySelectorAll("mark")).toHaveLength(3);
+  });
+
   it("keeps conversation listings out of the review page and links to the standalone page", async () => {
     vi.stubGlobal(
       "fetch",
@@ -483,6 +576,9 @@ describe("PAC review workspace", () => {
 
   it("lets the doctor switch patient summary language and play generated audio in the drawer", async () => {
     const user = userEvent.setup();
+    const play = vi
+      .spyOn(HTMLMediaElement.prototype, "play")
+      .mockResolvedValue(undefined);
     const processedEncounter = {
       ...demoEncounter,
       customerSummary:
@@ -547,10 +643,19 @@ describe("PAC review workspace", () => {
     );
 
     expect(await screen.findByText(/आपकी पीएसी रिकॉर्डिंग/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/play patient summary audio/i)).toHaveAttribute(
+    const audio = screen.getByLabelText(/play patient summary audio/i);
+    expect(audio).toHaveAttribute(
       "src",
       "data:audio/mpeg;base64,aGVsbG8="
     );
+    await user.click(
+      screen.getByRole("button", { name: "Play patient audio" })
+    );
+    expect(play).toHaveBeenCalledOnce();
+    fireEvent.play(audio);
+    expect(
+      screen.getByRole("button", { name: "Replay patient audio" })
+    ).toBeInTheDocument();
   });
 
   it("uploads the complete synthetic recording and shows translated diarized evidence", async () => {

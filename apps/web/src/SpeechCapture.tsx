@@ -20,6 +20,8 @@ export function SpeechCapture({
   const [error, setError] = useState<string | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
+  const startedAtMs = useRef<number | null>(null);
+  const durationSeconds = useRef(0);
 
   async function startRecording() {
     setError(null);
@@ -44,7 +46,8 @@ export function SpeechCapture({
           const extracted = await transcribeEncounterSpeech(
             encounterId,
             audio,
-            "hi-IN"
+            "hi-IN",
+            durationSeconds.current
           );
           setResult(extracted.transcription);
           onEncounter(extracted.encounter);
@@ -58,6 +61,7 @@ export function SpeechCapture({
       });
       recorder.current = nextRecorder;
       nextRecorder.start();
+      startedAtMs.current = Date.now();
       setState("recording");
     } catch (caught) {
       setError(
@@ -68,6 +72,11 @@ export function SpeechCapture({
   }
 
   function stopRecording() {
+    durationSeconds.current =
+      startedAtMs.current === null
+        ? 0
+        : Math.max(0, (Date.now() - startedAtMs.current) / 1000);
+    startedAtMs.current = null;
     recorder.current?.stop();
   }
 
@@ -90,8 +99,8 @@ export function SpeechCapture({
         </div>
       ) : (
         <p className="capture-prompt">
-          Capture one patient answer. Sarvam creates source-linked suggestions;
-          they remain review-only until a clinician confirms them.
+          Add details whenever the patient shares something new. Each recording
+          is transcribed and appended as review-only evidence.
         </p>
       )}
       <button
@@ -104,12 +113,10 @@ export function SpeechCapture({
         {state === "transcribing" && <LoaderCircle className="spin" size={15} />}
         {(state === "idle" || state === "complete") && <Mic2 size={15} />}
         {state === "recording"
-          ? "Stop & transcribe"
+          ? "Stop & add to PAC"
           : state === "transcribing"
-            ? "Transcribing…"
-            : result
-              ? "Record again"
-              : "Record patient"}
+            ? "Transcribing with Sarvam…"
+            : "Record additional interaction"}
       </button>
       {error && <p className="capture-error" role="alert">{error}</p>}
     </section>
