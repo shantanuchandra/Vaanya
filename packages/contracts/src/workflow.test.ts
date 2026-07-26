@@ -82,6 +82,46 @@ const encounter = EncounterSchema.parse({
 });
 
 describe("workflow transitions", () => {
+  it("preserves grounded evidence phrases and recording metadata", () => {
+    const parsed = EncounterSchema.parse({
+      ...encounter,
+      recordings: [
+        {
+          id: "recording-1",
+          sourceType: "uploaded_mp4",
+          durationSeconds: 76,
+          recordedAt: "2026-07-26T09:14:01.000Z"
+        }
+      ],
+      transcript: [
+        {
+          id: "turn-1",
+          speaker: "patient",
+          language: "en-IN",
+          original: "I took the blood thinner yesterday.",
+          translation: "I took the blood thinner yesterday.",
+          evidencePhrases: ["blood thinner", "yesterday"],
+          confidence: 0.95,
+          offsetSeconds: 4
+        }
+      ]
+    });
+
+    expect(parsed.recordings).toEqual([
+      {
+        id: "recording-1",
+        sourceType: "uploaded_mp4",
+        durationSeconds: 76,
+        recordedAt: "2026-07-26T09:14:01.000Z"
+      }
+    ]);
+    expect(parsed.transcript[0]?.evidencePhrases).toEqual([
+      "blood thinner",
+      "yesterday"
+    ]);
+    expect(EncounterSchema.parse(encounter).recordings).toEqual([]);
+  });
+
   it("allows clinician-entered content without manufactured transcript evidence", () => {
     expect(() =>
       FieldProposalSchema.parse({

@@ -106,6 +106,7 @@ type BuildServerOptions = {
       segments: DiarizedSegment[],
       checklistItems?: Array<{ itemId: string; label: string }>
     ): Promise<PacConversationStructure>;
+    highlightEvidencePhrases?(text: string): Promise<string[]>;
     suggestChecklistForUnknownProcedure?(input: {
       procedure: string;
       existingItems: Array<{ itemId: string; label: string }>;
@@ -139,6 +140,11 @@ const PATIENT_SUMMARY_LANGUAGES = new Set<SarvamTextLanguageCode>([
   "te-IN"
 ]);
 
+function normalizedDurationSeconds(value?: string): number {
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration >= 0 ? duration : 0;
+}
+
 type SpeechExtractionClient = NonNullable<BuildServerOptions["sarvamClient"]>;
 
 async function extractSpeechIntoEncounter(input: {
@@ -151,6 +157,10 @@ async function extractSpeechIntoEncounter(input: {
     mimeType: string;
   };
   languageCode: SarvamLanguageCode;
+  durationSeconds?: number;
+  openAiPacClient?: {
+    highlightEvidencePhrases?(text: string): Promise<string[]>;
+  } | null;
 }) {
   const transcription = await input.sarvamClient.transcribe({
     bytes: input.audio.bytes,
@@ -163,6 +173,10 @@ async function extractSpeechIntoEncounter(input: {
     turnId,
     transcript: transcription.transcript
   });
+  const evidencePhrases =
+    (await input.openAiPacClient?.highlightEvidencePhrases?.(
+      transcription.transcript
+    )) ?? [];
   const medicationUnknown =
     /blood[\s-]*thin|khoon\s+patla/i.test(transcription.transcript) &&
     /naam|name|yaad nahi|remember/i.test(transcription.transcript);
@@ -193,11 +207,24 @@ async function extractSpeechIntoEncounter(input: {
         language: transcription.languageCode ?? "unknown",
         original: transcription.transcript,
         translation: transcription.transcript,
+        evidencePhrases,
         confidence: transcription.languageProbability ?? 0.85,
         offsetSeconds:
           (input.encounter.transcript.at(-1)?.offsetSeconds ?? 0) + 5
       }
     ],
+    recordings:
+      input.durationSeconds === undefined
+        ? input.encounter.recordings
+        : [
+            ...input.encounter.recordings,
+            {
+              id: crypto.randomUUID(),
+              sourceType: "microphone" as const,
+              durationSeconds: input.durationSeconds,
+              recordedAt: new Date().toISOString()
+            }
+          ],
     proposals: [
       ...input.encounter.proposals.filter(
         existing => !suggestions.some(item => item.field === existing.id)
@@ -367,6 +394,7 @@ function encounterFromDiarizedRecording(input: {
       original: segment.originalText,
       translation: segment.translatedText,
       confidence: 0.9,
+      evidencePhrases: turn?.evidencePhrases ?? [],
       offsetSeconds: segment.startSeconds
     };
   });
@@ -399,6 +427,20 @@ function encounterFromDiarizedRecording(input: {
     state: "clinician_review",
     sourceType: "uploaded_mp4",
     customerSummary: input.customerSummary,
+    recordings: [
+      ...input.encounter.recordings.filter(
+        recording => recording.sourceType !== "uploaded_mp4"
+      ),
+      {
+        id: crypto.randomUUID(),
+        sourceType: "uploaded_mp4",
+        durationSeconds: Math.max(
+          0,
+          ...input.segments.map(segment => segment.endSeconds)
+        ),
+        recordedAt: new Date().toISOString()
+      }
+    ],
     transcript: [...input.encounter.transcript, ...transcript],
     proposals: [...preservedProposals, ...generatedProposals],
     recommendationQuestions: buildRecommendationQuestions(
@@ -917,7 +959,10 @@ export async function buildServer(options: BuildServerOptions = {}) {
 
   server.post<{
     Params: { id: string };
-    Querystring: { languageCode?: SarvamLanguageCode };
+    Querystring: {
+      languageCode?: SarvamLanguageCode;
+      durationSeconds?: string;
+    };
   }>("/api/encounters/:id/speech", async (request, reply) => {
     const encounter = await store.get(request.params.id);
     if (!encounter) {
@@ -952,7 +997,11 @@ export async function buildServer(options: BuildServerOptions = {}) {
           filename: audio.filename,
           mimeType: audio.mimetype
         },
-        languageCode: request.query.languageCode ?? "unknown"
+        languageCode: request.query.languageCode ?? "unknown",
+        durationSeconds: normalizedDurationSeconds(
+          request.query.durationSeconds
+        ),
+        openAiPacClient
       });
       const saved = await store.save(extracted.encounter);
       return { ...extracted, encounter: saved };

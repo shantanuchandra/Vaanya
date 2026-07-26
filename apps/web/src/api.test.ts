@@ -119,11 +119,12 @@ describe("speech API", () => {
     await transcribeEncounterSpeech(
       "demo",
       new Blob(["audio"], { type: "audio/webm" }),
-      "hi-IN"
+      "hi-IN",
+      12.4
     );
 
     expect(fetcher.mock.calls[0]![0]).toBe(
-      "/api/encounters/demo/speech?languageCode=hi-IN"
+      "/api/encounters/demo/speech?languageCode=hi-IN&durationSeconds=12.4"
     );
   });
 

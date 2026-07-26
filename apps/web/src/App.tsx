@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   CircleAlert,
@@ -38,6 +38,7 @@ import {
   type PatientSummaryLanguageCode
 } from "./api";
 import { PacChecklist } from "./PacChecklist";
+import { EvidenceText } from "./EvidenceText";
 import { SpeechCapture } from "./SpeechCapture";
 import "./styles.css";
 
@@ -59,6 +60,38 @@ function formatOffset(seconds: number) {
   return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 }
 
+function formatDuration(seconds: number) {
+  return formatOffset(Math.floor(seconds));
+}
+
+function recordingSummary(
+  encounter: Encounter,
+  hasLegacyUploadedRecording = false
+) {
+  const totalSeconds = encounter.recordings.reduce(
+    (sum, recording) => sum + recording.durationSeconds,
+    0
+  );
+  if (encounter.recordings.length > 0) {
+    return {
+      label: `${encounter.recordings.length} ${
+        encounter.recordings.length === 1 ? "recording" : "recordings"
+      }`,
+      duration: formatDuration(totalSeconds)
+    };
+  }
+  if (hasLegacyUploadedRecording) {
+    return {
+      label: "1 recording",
+      duration: null
+    };
+  }
+  return {
+    label: "No recordings",
+    duration: null
+  };
+}
+
 function EvidenceTurn({
   turn,
   active
@@ -76,8 +109,17 @@ function EvidenceTurn({
           <span>{turn.language}</span>
           <span>{Math.round(turn.confidence * 100)}% confidence</span>
         </div>
-        <p lang={turn.language}>{turn.original}</p>
-        <p className="translation">{turn.translation}</p>
+        <EvidenceText
+          text={turn.original}
+          phrases={turn.evidencePhrases ?? []}
+          lang={turn.language}
+        />
+        <EvidenceText
+          className="translation"
+          text={turn.translation}
+          phrases={turn.evidencePhrases ?? []}
+          lang="en-IN"
+        />
       </div>
     </article>
   );
@@ -100,11 +142,15 @@ function App() {
   >(null);
   const [selectedRecordingFile, setSelectedRecordingFile] =
     useState<File | null>(null);
+  const [selectedRecordingPreviewUrl, setSelectedRecordingPreviewUrl] =
+    useState<string | null>(null);
   const [handoff, setHandoff] = useState<KannadaHandoff | null>(null);
   const [patientSummaryLanguage, setPatientSummaryLanguage] =
     useState<PatientSummaryLanguageCode>("hi-IN");
   const [patientSummaryHandoff, setPatientSummaryHandoff] =
     useState<PatientSummaryHandoff | null>(null);
+  const [patientAudioStarted, setPatientAudioStarted] = useState(false);
+  const patientAudioRef = useRef<HTMLAudioElement | null>(null);
   const [summaryEmailSent, setSummaryEmailSent] = useState(false);
 
   useEffect(() => {
@@ -129,6 +175,25 @@ function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedRecordingFile) {
+      setSelectedRecordingPreviewUrl(null);
+      return;
+    }
+    if (
+      typeof URL.createObjectURL !== "function" ||
+      typeof URL.revokeObjectURL !== "function"
+    ) {
+      setSelectedRecordingPreviewUrl(null);
+      return;
+    }
+    const previewUrl = URL.createObjectURL(selectedRecordingFile);
+    setSelectedRecordingPreviewUrl(previewUrl);
+    return () => {
+      URL.revokeObjectURL(previewUrl);
+    };
+  }, [selectedRecordingFile]);
 
   useEffect(() => {
     let active = true;
@@ -189,6 +254,18 @@ function App() {
         event.action === "recording.synthetic_processed" &&
         event.detail.syntheticDemo === true
     )
+  );
+  const hasLegacyUploadedRecording = Boolean(
+    encounter?.audit.some(
+      event => event.action === "recording.synthetic_processed"
+    )
+  );
+  const evidenceRecordingSummary = useMemo(
+    () =>
+      encounter
+        ? recordingSummary(encounter, hasLegacyUploadedRecording)
+        : null,
+    [encounter, hasLegacyUploadedRecording]
   );
 
   async function confirmSelectedField() {
@@ -414,6 +491,7 @@ function App() {
         patientSummaryLanguage
       );
       setPatientSummaryHandoff(generated);
+      setPatientAudioStarted(false);
       setNotice("Patient-language summary audio is ready.");
     } catch (error) {
       setNotice(
@@ -423,6 +501,16 @@ function App() {
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function playPatientSummaryAudio() {
+    try {
+      await patientAudioRef.current?.play();
+    } catch {
+      setNotice(
+        "Patient audio could not be played. Use the audio controls below."
+      );
     }
   }
 
@@ -530,6 +618,14 @@ function App() {
               {selectedRecordingFile ? (
                 <span>{selectedRecordingFile.name}</span>
               ) : null}
+              {selectedRecordingPreviewUrl ? (
+                <audio
+                  aria-label="Preview selected conversation audio"
+                  className="selected-recording-preview"
+                  controls
+                  src={selectedRecordingPreviewUrl}
+                />
+              ) : null}
             </label>
             <button
               type="button"
@@ -609,7 +705,17 @@ function App() {
                   </p>
                 ) : null}
               </div>
-              <span className="recording-pill"><Mic2 size={13} /> 01:16</span>
+              <div className="recording-summary" aria-label="Encounter recordings">
+                <span className="recording-pill">
+                  <Mic2 size={13} />
+                  {evidenceRecordingSummary?.label}
+                </span>
+                {evidenceRecordingSummary?.duration ? (
+                  <span className="recording-duration">
+                    {evidenceRecordingSummary.duration}
+                  </span>
+                ) : null}
+              </div>
             </div>
             <SpeechCapture
               encounterId={encounter.id}
@@ -745,9 +851,21 @@ function App() {
                       <p lang={patientSummaryHandoff.languageCode}>
                         {patientSummaryHandoff.translatedText}
                       </p>
+                      <button
+                        className="patient-audio-trigger"
+                        type="button"
+                        onClick={playPatientSummaryAudio}
+                      >
+                        <Volume2 size={16} />
+                        {patientAudioStarted
+                          ? "Replay patient audio"
+                          : "Play patient audio"}
+                      </button>
                       <audio
                         aria-label="Play patient summary audio"
                         controls
+                        ref={patientAudioRef}
+                        onPlay={() => setPatientAudioStarted(true)}
                         src={`data:${patientSummaryHandoff.audioMimeType};base64,${patientSummaryHandoff.audioBase64}`}
                       />
                     </div>
@@ -763,6 +881,7 @@ function App() {
                           event.target.value as PatientSummaryLanguageCode
                         );
                         setPatientSummaryHandoff(null);
+                        setPatientAudioStarted(false);
                       }}
                     >
                       {patientSummaryLanguages.map(language => (

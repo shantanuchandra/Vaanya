@@ -169,7 +169,8 @@ export async function transcribeAudio(
 export async function transcribeEncounterSpeech(
   encounterId: string,
   audio: Blob,
-  languageCode: "unknown" | "hi-IN" | "kn-IN" | "en-IN" = "unknown"
+  languageCode: "unknown" | "hi-IN" | "kn-IN" | "en-IN" = "unknown",
+  durationSeconds = 0
 ): Promise<{
   transcription: TranscriptionResult;
   suggestions: Array<{
@@ -183,7 +184,7 @@ export async function transcribeEncounterSpeech(
   const form = new FormData();
   form.set("file", audio, `patient-${Date.now()}.webm`);
   const response = await protectedFetch(
-    `${API_BASE}/api/encounters/${encounterId}/speech?languageCode=${languageCode}`,
+    `${API_BASE}/api/encounters/${encounterId}/speech?languageCode=${languageCode}&durationSeconds=${encodeURIComponent(durationSeconds)}`,
     { method: "POST", body: form }
   );
   const payload = await response.json();

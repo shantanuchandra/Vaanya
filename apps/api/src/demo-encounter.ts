@@ -19,6 +19,14 @@ export function createDemoEncounter(): Encounter {
     preferredLanguage: "hi-IN",
     state: "clinician_review",
     consentRecorded: true,
+    recordings: [
+      {
+        id: "recording-demo-upload",
+        sourceType: "uploaded_mp4",
+        durationSeconds: 76,
+        recordedAt: "2026-07-26T09:14:01.000Z"
+      }
+    ],
     requiredFieldIds: ["medications", "allergies", "prior_anesthesia"],
     proposals: [
       ...[
