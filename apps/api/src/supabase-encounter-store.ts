@@ -439,4 +439,19 @@ export class SupabaseEncounterStore implements EncounterStore {
   async listRecordings(_input: { organizationId: string }) {
     return this.#demoStore.listRecordings(_input);
   }
+
+  async findChecklistLibraryVersion(input: {
+    organizationId: string;
+    normalizedProcedure: string;
+  }) {
+    return this.#demoStore.findChecklistLibraryVersion(input);
+  }
+
+  async publishChecklistLibraryVersion(
+    version: Parameters<
+      MemoryEncounterStore["publishChecklistLibraryVersion"]
+    >[0]
+  ) {
+    return this.#demoStore.publishChecklistLibraryVersion(version);
+  }
 }

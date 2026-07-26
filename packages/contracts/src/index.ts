@@ -3,6 +3,9 @@ import {
   CHECKLIST_TEMPLATE_ID,
   CHECKLIST_VERSION,
   ChecklistContextSchema,
+  ChecklistItemDefinitionSchema,
+  ChecklistLibraryReferenceSchema,
+  ChecklistSuggestionSchema,
   EvaluatedChecklistSchema,
   SYNTHETIC_PAC_TEMPLATE,
   checklistBlockers,
@@ -140,6 +143,11 @@ export const EncounterSchema = z.object({
     contextFlags: []
   }),
   checklist: EvaluatedChecklistSchema.optional(),
+  checklistSuggestions: z.array(ChecklistSuggestionSchema).default([]),
+  checklistExtensions: z
+    .array(ChecklistItemDefinitionSchema)
+    .default([]),
+  checklistLibrary: ChecklistLibraryReferenceSchema.optional(),
   requiredFieldIds: z.array(z.string()),
   proposals: z.array(FieldProposalSchema),
   transcript: z.array(TranscriptTurnSchema),
@@ -156,7 +164,8 @@ export function withEvaluatedChecklist(encounterInput: Encounter): Encounter {
       procedure: encounter.procedure,
       contextFlags: encounter.checklistContext.contextFlags,
       proposals: encounter.proposals,
-      transcript: encounter.transcript
+      transcript: encounter.transcript,
+      additionalItems: encounter.checklistExtensions
     })
   });
 }

@@ -103,4 +103,38 @@ describe("procedure-aware PAC checklist", () => {
     expect(result.applicableCount).toBeGreaterThan(result.answeredCount);
     expect(result.readyForSignoff).toBe(false);
   });
+
+  it("evaluates approved organization-library items as optional extensions", () => {
+    const result = evaluateChecklist({
+      procedure: "Unlisted procedure",
+      contextFlags: [],
+      proposals: [],
+      transcript: [],
+      additionalItems: [
+        {
+          id: "suggestion-run-1-1",
+          categoryId: "history",
+          label: "Reported procedure-specific history",
+          question: "Was reported procedure-specific history discussed?",
+          rationale: "Clinician-approved synthetic library extension.",
+          required: false,
+          authority: "evidence_or_clinician",
+          severity: "standard",
+          deferrable: true,
+          applicability: { kind: "always" }
+        }
+      ]
+    });
+
+    expect(
+      result.items.find(item => item.id === "suggestion-run-1-1")
+    ).toMatchObject({
+      status: "missing",
+      required: false,
+      applicable: true
+    });
+    expect(checklistBlockers(result).map(item => item.id)).not.toContain(
+      "suggestion-run-1-1"
+    );
+  });
 });

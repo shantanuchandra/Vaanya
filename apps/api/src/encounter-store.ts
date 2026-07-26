@@ -1,5 +1,6 @@
 import type {
   Encounter,
+  ChecklistLibraryVersion,
   PatientSummary,
   RecordingListItem,
   RecordingStatus
@@ -37,6 +38,13 @@ export interface EncounterStore {
   listRecordings(input: {
     organizationId: string;
   }): Promise<RecordingListItem[]>;
+  findChecklistLibraryVersion(input: {
+    organizationId: string;
+    normalizedProcedure: string;
+  }): Promise<ChecklistLibraryVersion | null>;
+  publishChecklistLibraryVersion(
+    version: ChecklistLibraryVersion
+  ): Promise<ChecklistLibraryVersion>;
 }
 
 function recordingStatus(encounter: Encounter): RecordingStatus {
@@ -99,6 +107,7 @@ export class MemoryEncounterStore implements EncounterStore {
     string,
     PatientSummary & { organizationId: string; normalizedLookup: string }
   >();
+  readonly #checklistLibrary = new Map<string, ChecklistLibraryVersion[]>();
 
   constructor(initial: Encounter[]) {
     for (const encounter of initial) {
@@ -229,6 +238,28 @@ export class MemoryEncounterStore implements EncounterStore {
     return sortRecordingList(
       [...this.#encounters.values()].map(recordingListItem)
     );
+  }
+
+  async findChecklistLibraryVersion(input: {
+    organizationId: string;
+    normalizedProcedure: string;
+  }): Promise<ChecklistLibraryVersion | null> {
+    return (
+      this.#checklistLibrary
+        .get(`${input.organizationId}:${input.normalizedProcedure}`)
+        ?.at(-1) ?? null
+    );
+  }
+
+  async publishChecklistLibraryVersion(
+    version: ChecklistLibraryVersion
+  ): Promise<ChecklistLibraryVersion> {
+    const key = `${version.organizationId}:${version.normalizedProcedure}`;
+    const versions = this.#checklistLibrary.get(key) ?? [];
+    if (versions.some(current => current.version === version.version))
+      throw new Error("Checklist library version already exists.");
+    this.#checklistLibrary.set(key, [...versions, version]);
+    return version;
   }
 }
 

@@ -82,6 +82,45 @@ export const ChecklistContextSchema = z.object({
 });
 export type ChecklistContext = z.infer<typeof ChecklistContextSchema>;
 
+export const ChecklistSuggestionSchema = z.object({
+  id: z.string().min(1),
+  procedure: z.string().min(1),
+  modelRunId: z.string().min(1),
+  categoryId: z.string().min(1),
+  question: z.string().min(1),
+  rationale: z.string().min(1),
+  required: z.literal(false),
+  severity: z.literal("standard"),
+  authority: z.literal("evidence_or_clinician"),
+  deferrable: z.literal(true),
+  approvalState: z.enum([
+    "pending_clinician_review",
+    "approved",
+    "rejected"
+  ]),
+  decidedBy: z.string().min(1).optional(),
+  decidedAt: z.string().datetime().optional()
+});
+export type ChecklistSuggestion = z.infer<typeof ChecklistSuggestionSchema>;
+
+export const ChecklistLibraryReferenceSchema = z.object({
+  normalizedProcedure: z.string().min(1),
+  version: z.number().int().positive(),
+  source: z.literal("clinician_reviewed_synthetic")
+});
+
+export const ChecklistLibraryVersionSchema = z.object({
+  organizationId: z.string().min(1),
+  normalizedProcedure: z.string().min(1),
+  version: z.number().int().positive(),
+  source: z.literal("clinician_reviewed_synthetic"),
+  publishedBy: z.string().min(1),
+  items: z.array(ChecklistItemDefinitionSchema).min(1)
+});
+export type ChecklistLibraryVersion = z.infer<
+  typeof ChecklistLibraryVersionSchema
+>;
+
 export const EvaluatedChecklistItemSchema =
   ChecklistItemDefinitionSchema.extend({
     status: ChecklistItemStatusSchema,
@@ -138,6 +177,7 @@ export type ChecklistEvaluationInput = {
   contextFlags: string[];
   proposals: ProposalInput[];
   transcript: Array<{ id: string }>;
+  additionalItems?: ChecklistItemDefinition[];
 };
 
 const always = { kind: "always" as const };
@@ -446,8 +486,20 @@ export function evaluateChecklist(
   const transcriptIds = new Set(input.transcript.map(turn => turn.id));
   const proposals = new Map(input.proposals.map(proposal => [proposal.id, proposal]));
 
+  const definitions = [
+    ...SYNTHETIC_PAC_TEMPLATE.items,
+    ...(input.additionalItems ?? []).filter(
+      additional =>
+        SYNTHETIC_PAC_TEMPLATE.categories.some(
+          category => category.id === additional.categoryId
+        ) &&
+        !SYNTHETIC_PAC_TEMPLATE.items.some(
+          existing => existing.id === additional.id
+        )
+    )
+  ];
   const evaluatedItems: EvaluatedChecklistItem[] =
-    SYNTHETIC_PAC_TEMPLATE.items.map(definition => {
+    definitions.map(definition => {
       const applicable = applies(definition, procedureFamily, flags);
       const proposal = proposals.get(definition.id);
       return {
