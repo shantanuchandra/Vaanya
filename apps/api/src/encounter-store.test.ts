@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDemoEncounters } from "./demo-cohort";
-import { MemoryEncounterStore } from "./encounter-store";
+import { MemoryEncounterStore, recordingListItem } from "./encounter-store";
 
 describe("recordings worklist", () => {
   it("pins unprocessed uploads before newer processed recordings", async () => {
@@ -25,5 +25,19 @@ describe("recordings worklist", () => {
         organizationId: "4cbcb624-214f-4f4a-a3dc-08b41fa10000"
       })
     ).resolves.toHaveLength(10);
+  });
+
+  it("reports every required item as an open gap before an upload is processed", () => {
+    const encounter = createDemoEncounters().find(
+      item => item.id === "synthetic-kavya"
+    );
+    expect(encounter).toBeDefined();
+
+    expect(recordingListItem(encounter!)).toMatchObject({
+      status: "uploaded",
+      answeredCount: 0,
+      applicableCount: 1,
+      criticalGapCount: 1
+    });
   });
 });

@@ -5,8 +5,7 @@ import {
   type PatientSummary
 } from "@vaanaya/contracts";
 import {
-  recordingListItem,
-  sortRecordingList,
+  MemoryEncounterStore,
   type EncounterStore
 } from "./encounter-store";
 import { createDemoEncounters } from "./demo-cohort";
@@ -31,17 +30,14 @@ export function transcriptRowsToInsert(
 ) {
   return transcript.flatMap((turn, index) => {
     const sequenceNumber = index + 1;
-    if (
-      persistedSequences.has(sequenceNumber) ||
-      !["clinician", "patient", "caregiver"].includes(turn.speaker)
-    ) {
+    if (persistedSequences.has(sequenceNumber)) {
       return [];
     }
     return [
       {
         encounter_id: encounterId,
         sequence_number: sequenceNumber,
-        speaker_role: turn.speaker as "clinician" | "patient" | "caregiver",
+        speaker_role: turn.speaker,
         source_language: turn.language,
         original_text: turn.original,
         translated_text: turn.translation,
@@ -52,7 +48,51 @@ export function transcriptRowsToInsert(
   });
 }
 
+export function proposalRowsToInsert(
+  encounterId: number,
+  clinicianId: string,
+  proposals: Encounter["proposals"],
+  persistedFieldKeys: ReadonlySet<string>
+) {
+  return proposals
+    .filter(proposal => !persistedFieldKeys.has(proposal.id))
+    .map(proposal => ({
+      encounter_id: encounterId,
+      field_key: proposal.id,
+      field_label: proposal.label,
+      field_state: proposal.state,
+      proposed_value: proposal.value,
+      required: proposal.required,
+      model_name: "openai",
+      updated_by: clinicianId
+    }));
+}
+
+export function sourceRowsToInsert(
+  proposals: Encounter["proposals"],
+  proposalIdByFieldKey: ReadonlyMap<string, number>,
+  transcriptIdByTurnId: ReadonlyMap<string, number>
+) {
+  return proposals.flatMap(proposal => {
+    const proposalId = proposalIdByFieldKey.get(proposal.id);
+    if (!proposalId) return [];
+    return proposal.sourceTurnIds.flatMap(turnId => {
+      const transcriptSegmentId = transcriptIdByTurnId.get(turnId);
+      return transcriptSegmentId
+        ? [
+            {
+              proposal_id: proposalId,
+              transcript_segment_id: transcriptSegmentId
+            }
+          ]
+        : [];
+    });
+  });
+}
+
 export class SupabaseEncounterStore implements EncounterStore {
+  readonly #demoStore = new MemoryEncounterStore(createDemoEncounters());
+
   constructor(private readonly client: SupabaseClient) {}
 
   static fromEnvironment(): SupabaseEncounterStore | null {
@@ -87,7 +127,7 @@ export class SupabaseEncounterStore implements EncounterStore {
 
   async get(id: string): Promise<Encounter | null> {
     if (id.startsWith("synthetic-")) {
-      return createDemoEncounters().find(encounter => encounter.id === id) ?? null;
+      return this.#demoStore.get(id);
     }
     const encounter = await this.encounterRow(id);
     if (!encounter) return null;
@@ -192,6 +232,9 @@ export class SupabaseEncounterStore implements EncounterStore {
   }
 
   async save(encounter: Encounter): Promise<Encounter> {
+    if (encounter.id.startsWith("synthetic-")) {
+      return this.#demoStore.save(encounter);
+    }
     const row = await this.encounterRow(encounter.id);
     if (!row) throw new Error("Cannot persist an encounter that does not exist.");
     if (!row.assigned_clinician_id)
@@ -230,8 +273,22 @@ export class SupabaseEncounterStore implements EncounterStore {
         throw new Error(`Supabase transcript write failed: ${error.message}`);
     }
 
+    const newProposalRows = proposalRowsToInsert(
+      row.id,
+      row.assigned_clinician_id,
+      encounter.proposals,
+      new Set((persistedProposals ?? []).map(item => item.field_key))
+    );
+    if (newProposalRows.length) {
+      const { error } = await this.client
+        .from("pac_field_proposals")
+        .insert(newProposalRows);
+      if (error)
+        throw new Error(`Supabase proposal insert failed: ${error.message}`);
+    }
+
     for (const proposal of encounter.proposals) {
-      const persisted = persistedProposals.find(
+      const persisted = (persistedProposals ?? []).find(
         item => item.field_key === proposal.id
       );
       if (!persisted) continue;
@@ -263,6 +320,62 @@ export class SupabaseEncounterStore implements EncounterStore {
         });
       if (editError)
         throw new Error(`Supabase clinician edit failed: ${editError.message}`);
+    }
+
+    const [persistedTranscriptResult, persistedProposalResult] =
+      await Promise.all([
+        this.client
+          .from("transcript_segments")
+          .select("id,sequence_number")
+          .eq("encounter_id", row.id),
+        this.client
+          .from("pac_field_proposals")
+          .select("id,field_key")
+          .eq("encounter_id", row.id)
+      ]);
+    if (persistedTranscriptResult.error)
+      throw new Error(
+        `Supabase transcript source read failed: ${persistedTranscriptResult.error.message}`
+      );
+    if (persistedProposalResult.error)
+      throw new Error(
+        `Supabase proposal source read failed: ${persistedProposalResult.error.message}`
+      );
+
+    const proposalIdByFieldKey = new Map(
+      (persistedProposalResult.data ?? []).map(proposal => [
+        proposal.field_key,
+        proposal.id
+      ])
+    );
+    const transcriptIdByTurnId = new Map(
+      (persistedTranscriptResult.data ?? []).map(segment => [
+        `t${segment.sequence_number}`,
+        segment.id
+      ])
+    );
+    const proposalIds = encounter.proposals
+      .map(proposal => proposalIdByFieldKey.get(proposal.id))
+      .filter((id): id is number => typeof id === "number");
+    if (proposalIds.length) {
+      const { error } = await this.client
+        .from("pac_field_sources")
+        .delete()
+        .in("proposal_id", proposalIds);
+      if (error)
+        throw new Error(`Supabase proposal source reset failed: ${error.message}`);
+    }
+    const sourceRows = sourceRowsToInsert(
+      encounter.proposals,
+      proposalIdByFieldKey,
+      transcriptIdByTurnId
+    );
+    if (sourceRows.length) {
+      const { error } = await this.client
+        .from("pac_field_sources")
+        .insert(sourceRows);
+      if (error)
+        throw new Error(`Supabase proposal source write failed: ${error.message}`);
     }
 
     if (row.state !== encounter.state) {
@@ -324,8 +437,6 @@ export class SupabaseEncounterStore implements EncounterStore {
   }
 
   async listRecordings(_input: { organizationId: string }) {
-    return sortRecordingList(
-      createDemoEncounters().map(recordingListItem)
-    );
+    return this.#demoStore.listRecordings(_input);
   }
 }

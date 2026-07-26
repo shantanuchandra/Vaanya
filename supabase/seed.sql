@@ -1,0 +1,3 @@
+-- Intentionally empty.
+-- Synthetic buildathon cases are created by the application demo store, not
+-- inserted into the clinical database.
