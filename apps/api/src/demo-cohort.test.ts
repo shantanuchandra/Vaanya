@@ -35,5 +35,23 @@ describe("synthetic PAC cohort", () => {
         item => item.patient?.displayName === "Shantanu Chandra"
       )?.procedure
     ).toBe("Laparoscopic hernia repair");
+    expect(
+      new Set(encounters.map(item => item.checklist?.procedureFamily))
+    ).toEqual(
+      new Set([
+        "laparoscopic_abdominal",
+        "hysterectomy",
+        "knee_replacement",
+        "upper_gi_endoscopy",
+        "urological",
+        "cataract",
+        "breast"
+      ])
+    );
+    expect(
+      encounters.every(
+        item => item.checklist?.version === "synthetic-pac-v1"
+      )
+    ).toBe(true);
   });
 });

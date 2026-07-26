@@ -1,7 +1,11 @@
-import { EncounterSchema, type Encounter } from "@vaanaya/contracts";
+import {
+  EncounterSchema,
+  withEvaluatedChecklist,
+  type Encounter
+} from "@vaanaya/contracts";
 
 export function createDemoEncounter(): Encounter {
-  return EncounterSchema.parse({
+  return withEvaluatedChecklist(EncounterSchema.parse({
     id: "demo",
     patient: {
       id: "patient-demo-shantanu",
@@ -16,6 +20,22 @@ export function createDemoEncounter(): Encounter {
     consentRecorded: true,
     requiredFieldIds: ["medications", "allergies", "prior_anesthesia"],
     proposals: [
+      ...[
+        ["identity", "Patient identity", "Identity confirmed by clinician."],
+        ["procedure", "Planned procedure", "Procedure confirmed by clinician."],
+        ["consent", "Recording consent", "Recording consent documented."],
+        ["medical_history", "Relevant medical history", "History reviewed by clinician."],
+        ["examination", "Clinician examination", "Examination entered by clinician."],
+        ["open_items", "Open items", "Open items reviewed by clinician."],
+        ["clinician_conclusion", "Clinician conclusion", "Conclusion entered by clinician."]
+      ].map(([id, label, value]) => ({
+        id,
+        label,
+        state: "clinician_entered" as const,
+        value,
+        sourceTurnIds: [],
+        required: true
+      })),
       {
         id: "medications",
         label: "Current medicines",
@@ -34,7 +54,7 @@ export function createDemoEncounter(): Encounter {
         required: true
       },
       {
-        id: "prior_anesthesia",
+        id: "previous_anesthesia",
         label: "Previous anesthesia",
         state: "captured",
         value: "Previous procedure reported; no complication recalled.",
@@ -122,5 +142,5 @@ export function createDemoEncounter(): Encounter {
         }
       }
     ]
-  });
+  }));
 }
