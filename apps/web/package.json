@@ -17,7 +17,8 @@
     "@vaanaya/contracts": "0.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-h5-audio-player": "^3.10.2"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.0",

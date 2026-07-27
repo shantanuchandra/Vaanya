@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import AudioPlayer from "react-h5-audio-player";
+import "react-h5-audio-player/lib/styles.css";
 import {
   ArrowRight,
   CircleAlert,
@@ -6,15 +8,16 @@ import {
   Languages,
   Mic2,
   Radio,
+  Search,
   ShieldCheck,
   Sparkles,
   Volume2,
-  Printer,
-  Search
+  Printer
 } from "lucide-react";
 import type {
   Encounter,
   PatientSummary,
+  RecordingListItem,
   TranscriptTurn
 } from "@vaanaya/contracts";
 import { evaluateChecklist } from "@vaanaya/contracts";
@@ -28,10 +31,10 @@ import {
   createKannadaHandoff,
   createPatientSummaryHandoff,
   getEncounter,
+  getRecordings,
   publishChecklistSuggestionsRequest,
   requestSecondOpinion,
   resolveField,
-  searchPatients,
   signEncounterRequest,
   type KannadaHandoff,
   type PatientSummaryHandoff,
@@ -125,8 +128,33 @@ function EvidenceTurn({
   );
 }
 
+function uniqueLatestPatients(recordings: RecordingListItem[]) {
+  const byPatient = new Map<string, RecordingListItem>();
+  for (const recording of [...recordings].sort((left, right) =>
+    right.recordedAt.localeCompare(left.recordedAt)
+  )) {
+    if (!byPatient.has(recording.patient.id)) {
+      byPatient.set(recording.patient.id, recording);
+    }
+  }
+  return [...byPatient.values()].slice(0, 3);
+}
+
+function patientMatchesQuery(patient: PatientSummary, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return (
+    patient.displayName.toLowerCase().includes(normalizedQuery) ||
+    patient.mobileNumber.includes(normalizedQuery) ||
+    patient.mobileLast4.includes(normalizedQuery)
+  );
+}
+
 function App() {
+  const isRecordingsPage = window.location.pathname === "/recordings";
   const [encounter, setEncounter] = useState<Encounter | null>(null);
+  const [recordings, setRecordings] = useState<RecordingListItem[]>([]);
+  const [secondOpinionOnly, setSecondOpinionOnly] = useState(false);
   const [patientQuery, setPatientQuery] = useState("");
   const [patients, setPatients] = useState<PatientSummary[]>([]);
   const [selectedPatient, setSelectedPatient] = useState<PatientSummary | null>(
@@ -152,11 +180,15 @@ function App() {
   const [patientAudioStarted, setPatientAudioStarted] = useState(false);
   const patientAudioRef = useRef<HTMLAudioElement | null>(null);
   const [summaryEmailSent, setSummaryEmailSent] = useState(false);
+  const [customerSummaryOpen, setCustomerSummaryOpen] = useState(false);
 
   useEffect(() => {
+    if (isRecordingsPage) return;
     let active = true;
-    const encounterId =
-      new URLSearchParams(window.location.search).get("encounter") ?? "demo";
+    const encounterId = new URLSearchParams(window.location.search).get(
+      "encounter"
+    );
+    if (!encounterId) return;
     getEncounter(encounterId)
       .then(data => {
         if (!active) return;
@@ -174,7 +206,25 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [isRecordingsPage]);
+
+  useEffect(() => {
+    if (!isRecordingsPage) return;
+    let active = true;
+    getRecordings()
+      .then(items => {
+        if (active) setRecordings(items);
+      })
+      .catch(error => {
+        if (active)
+          setNotice(
+            error instanceof Error ? error.message : "Recordings unavailable."
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [isRecordingsPage]);
 
   useEffect(() => {
     if (!selectedRecordingFile) {
@@ -196,29 +246,34 @@ function App() {
   }, [selectedRecordingFile]);
 
   useEffect(() => {
+    if (isRecordingsPage) return;
     let active = true;
-    const encounterPatient = encounter?.patient;
-    const fallbackPatient =
-      encounterPatient && patientMatchesQuery(encounterPatient, patientQuery)
-        ? [encounterPatient]
-        : [];
-    searchPatients(patientQuery)
-      .then(results => {
-        if (active) setPatients(results.length ? results : fallbackPatient);
+    getRecordings()
+      .then(items => {
+        if (!active) return;
+        const latestPatients = uniqueLatestPatients(items).map(
+          item => item.patient
+        );
+        setPatients(
+          latestPatients.length
+            ? latestPatients
+            : encounter?.patient
+              ? [encounter.patient]
+              : []
+        );
+        setSelectedPatient(current => current ?? latestPatients[0] ?? null);
       })
       .catch(() => {
-        if (active) setPatients(fallbackPatient);
+        if (active && encounter?.patient) setPatients([encounter.patient]);
       });
     return () => {
       active = false;
     };
-  }, [
-    encounter?.patient?.displayName,
-    encounter?.patient?.id,
-    encounter?.patient?.mobileLast4,
-    encounter?.patient?.mobileNumber,
-    patientQuery
-  ]);
+  }, [encounter?.patient, isRecordingsPage]);
+
+  useEffect(() => {
+    setCustomerSummaryOpen(false);
+  }, [encounter?.id, encounter?.customerSummary]);
 
   const selectedProposal = encounter?.proposals.find(
     proposal => proposal.id === selectedField
@@ -267,6 +322,12 @@ function App() {
         : null,
     [encounter, hasLegacyUploadedRecording]
   );
+  const displayedRecordings = useMemo(() => {
+    const latest = uniqueLatestPatients(recordings);
+    return secondOpinionOnly
+      ? latest.filter(recording => recording.secondOpinionRequested)
+      : latest;
+  }, [recordings, secondOpinionOnly]);
 
   async function confirmSelectedField() {
     if (!encounter || !selectedChecklistItem || !resolution.trim()) return;
@@ -514,12 +575,76 @@ function App() {
     }
   }
 
-  if (!encounter) {
+  if (isRecordingsPage) {
     return (
-      <main className="loading-shell">
-        <div className="loading-mark"><Mic2 size={20} /></div>
-        <p>{notice ?? "Loading the synthetic PAC encounter…"}</p>
-      </main>
+      <div className="app-shell">
+        <header className="topbar">
+          <a className="brand" href="/" aria-label="Vaanaya home">
+            <span className="brand-mark">V</span>
+            <span>
+              <strong>Vaanaya</strong>
+              <small>Pre-anesthetic record</small>
+            </span>
+          </a>
+          <nav className="topbar-nav" aria-label="Workspace navigation">
+            <a href="/">Review workspace</a>
+            <a href="/recordings">Recordings</a>
+          </nav>
+          <div className="encounter-state">
+            <span className="live-dot" />
+            Review in progress
+            <span className="state-divider" />
+            Synthetic data
+          </div>
+          <button className="clinician-chip" type="button">
+            <span>MC</span>
+            Dr Meera · Anesthesiologist
+          </button>
+        </header>
+        <main className="recordings-page">
+          <section className="recordings-toolbar">
+            <div>
+              <span className="section-label">Conversation listings</span>
+              <h1>Latest PAC recordings</h1>
+              <p>Open the most recent encounter per patient.</p>
+            </div>
+            <label className="second-opinion-filter">
+              <input
+                type="checkbox"
+                checked={secondOpinionOnly}
+                onChange={event => setSecondOpinionOnly(event.target.checked)}
+              />
+              Needs 2nd opinion
+            </label>
+          </section>
+          <section className="recording-list" aria-label="Conversation listings">
+            {displayedRecordings.map(recording => (
+              <a
+                className={
+                  recording.secondOpinionRequested
+                    ? "recording-card needs-second-opinion"
+                    : "recording-card"
+                }
+                href={`/?encounter=${recording.encounterId}`}
+                key={recording.encounterId}
+              >
+                <div>
+                  <strong>{recording.patient.displayName}</strong>
+                  <small>
+                    mobile ending {recording.patient.mobileLast4} ·{" "}
+                    {recording.procedure}
+                  </small>
+                </div>
+                <span>{recording.answeredCount}/{recording.applicableCount}</span>
+                {recording.secondOpinionRequested ? (
+                  <em>Needs 2nd opinion</em>
+                ) : null}
+              </a>
+            ))}
+          </section>
+          {notice && <div className="notice" role="status">{notice}</div>}
+        </main>
+      </div>
     );
   }
 
@@ -568,7 +693,9 @@ function App() {
               </span>
             </label>
             <div className="patient-results" aria-label="Patient results">
-              {patients.map(patient => (
+              {patients
+                .filter(patient => patientMatchesQuery(patient, patientQuery))
+                .map(patient => (
                 <button
                   key={patient.id}
                   className={
@@ -619,12 +746,15 @@ function App() {
                 <span>{selectedRecordingFile.name}</span>
               ) : null}
               {selectedRecordingPreviewUrl ? (
-                <audio
-                  aria-label="Preview selected conversation audio"
-                  className="selected-recording-preview"
-                  controls
-                  src={selectedRecordingPreviewUrl}
-                />
+                <div className="selected-recording-preview">
+                  <AudioPlayer
+                    src={selectedRecordingPreviewUrl}
+                    showJumpControls={false}
+                    customAdditionalControls={[]}
+                    customVolumeControls={[]}
+                    layout="horizontal"
+                  />
+                </div>
               ) : null}
             </label>
             <button
@@ -643,7 +773,7 @@ function App() {
                 : "Upload selected conversation"}
             </button>
           </div>
-          {encounter.recommendationQuestions?.length ? (
+          {encounter?.recommendationQuestions?.length ? (
             <div className="recommendation-questions">
               <span className="section-label">Next questions</span>
               {encounter.recommendationQuestions.map(question => (
@@ -654,7 +784,7 @@ function App() {
               ))}
             </div>
           ) : null}
-          <div className="second-opinion-actions">
+          {encounter ? <div className="second-opinion-actions">
             <button
               type="button"
               onClick={raiseSecondOpinion}
@@ -665,10 +795,10 @@ function App() {
                 ? "2nd opinion requested"
                 : "Ask for 2nd opinion"}
             </button>
-          </div>
+          </div> : null}
         </section>
 
-        <section className="case-header">
+        {encounter ? <section className="case-header">
           <div>
             <div className="eyebrow">PAC / {encounter.patientReference}</div>
             <h1>Listen once. Verify precisely.</h1>
@@ -691,7 +821,7 @@ function App() {
               <dd><ShieldCheck size={15} /> Recorded</dd>
             </div>
           </dl>
-        </section>
+        </section> : null}
 
         <section className="workspace">
           <aside className="evidence-panel" aria-label="Encounter evidence">
@@ -717,18 +847,20 @@ function App() {
                 ) : null}
               </div>
             </div>
-            <SpeechCapture
-              encounterId={encounter.id}
-              onEncounter={updated => {
-                setEncounter(updated);
-                setSelectedField(updated.proposals.at(-1)?.id ?? null);
-                setNotice(
-                  "Live speech added as source-linked suggestions for review."
-                );
-              }}
-            />
+            {encounter ? (
+              <SpeechCapture
+                encounterId={encounter.id}
+                onEncounter={updated => {
+                  setEncounter(updated);
+                  setSelectedField(updated.proposals.at(-1)?.id ?? null);
+                  setNotice(
+                    "Live speech added as source-linked suggestions for review."
+                  );
+                }}
+              />
+            ) : null}
             <div className="evidence-list">
-              {encounter.transcript.map(turn => (
+              {encounter?.transcript.map(turn => (
                 <EvidenceTurn
                   key={turn.id}
                   turn={turn}
@@ -758,7 +890,7 @@ function App() {
               </div>
             </div>
 
-            {displayedChecklist ? (
+            {displayedChecklist && encounter ? (
               <PacChecklist
                 checklist={displayedChecklist}
                 suggestions={encounter.checklistSuggestions}
@@ -828,8 +960,23 @@ function App() {
               </div>
             )}
 
-            {encounter.customerSummary && (
+            {encounter?.customerSummary ? (
+              <button
+                className="customer-summary-toggle"
+                type="button"
+                aria-expanded={customerSummaryOpen}
+                aria-controls="customer-summary-drawer"
+                onClick={() => setCustomerSummaryOpen(open => !open)}
+              >
+                {customerSummaryOpen
+                  ? "Close customer summary"
+                  : "Open customer summary"}
+              </button>
+            ) : null}
+
+            {encounter?.customerSummary && customerSummaryOpen && (
               <section
+                id="customer-summary-drawer"
                 className="customer-summary-drawer"
                 aria-label="Customer summary drawer"
               >
@@ -934,12 +1081,12 @@ function App() {
                   type="button"
                   onClick={signNote}
                   disabled={
-                    displayedChecklist?.readyForSignoff !== true ||
                     busy ||
-                    encounter.state === "signed"
+                    !encounter ||
+                    encounter?.state === "signed"
                   }
                 >
-                  {encounter.state === "signed" ? (
+                  {encounter?.state === "signed" ? (
                     <>
                       <FileCheck2 size={17} /> PAC note signed
                     </>
@@ -951,7 +1098,7 @@ function App() {
                 </button>
               </div>
             </footer>
-            {encounter.state === "signed" && (
+            {encounter?.state === "signed" && (
               <section className="patient-handoff" aria-label="Kannada patient handoff">
                 <div>
                   <span className="section-label">Patient handoff · Kannada</span>
@@ -987,16 +1134,6 @@ function App() {
         </section>
       </main>
     </div>
-  );
-}
-
-function patientMatchesQuery(patient: PatientSummary, query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return true;
-  return (
-    patient.displayName.toLowerCase().includes(normalizedQuery) ||
-    patient.mobileNumber.includes(normalizedQuery) ||
-    patient.mobileLast4.includes(normalizedQuery)
   );
 }
 

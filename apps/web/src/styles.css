@@ -668,6 +668,16 @@ main { max-width: 1500px; margin: 0 auto; padding: 0 34px 54px; }
   gap: 20px;
   align-items: center;
 }
+.customer-summary-toggle {
+  margin: 20px 24px 0;
+  padding: 11px 14px;
+  border: 1px solid #adc1b6;
+  background: white;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 620;
+  cursor: pointer;
+}
 .customer-summary-drawer h3 {
   font-family: var(--display);
   font-size: 22px;
